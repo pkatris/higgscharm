@@ -58,6 +58,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import uproot
+import hist
 from collections import defaultdict
 
 
@@ -560,7 +561,16 @@ def merge_bin_edges(edges, merge_ranges):
 # ---------------------------------------------------------------------------
 
 def build_histograms(mc_data, zx_scores, zx_weights):
+    """
+    Returns (histograms, histograms_var): parallel dicts, same keys.
+    `histograms[name]` is the per-bin sum-of-weights (as before).
+    `histograms_var[name]` is the per-bin sum-of-weights-SQUARED -- the true
+    statistical variance of a weighted-MC bin. Needed so write_root_file can
+    populate each template's real TH1::fSumw2 (see its docstring for why this
+    matters for autoMCStats). Mirrors the fix in create_datacards_ctag2d_100150.py.
+    """
     histograms = {}
+    histograms_var = {}
     n_bins = len(MVA_BINS) - 1
 
     print(f"\n  {'Process':<15} {'n_events':>10} {'hist_integral':>14}")
@@ -570,10 +580,13 @@ def build_histograms(mc_data, zx_scores, zx_weights):
         scores, weights, syst_scaled = mc_data[proc]
         if len(scores) == 0:
             histograms[proc] = np.zeros(n_bins)
+            histograms_var[proc] = np.zeros(n_bins)
             print(f"  {proc:<15} {'(empty)':>10}")
             continue
         h, _ = np.histogram(scores, bins=MVA_BINS, weights=weights)
+        h2, _ = np.histogram(scores, bins=MVA_BINS, weights=weights ** 2)
         histograms[proc] = h.astype(np.float64)
+        histograms_var[proc] = h2.astype(np.float64)
         print(f"  {proc:<15} {len(scores):>10} {h.sum():>14.4f}")
 
         for syst, by_dir in syst_scaled.items():
@@ -583,33 +596,56 @@ def build_histograms(mc_data, zx_scores, zx_weights):
                           f"({len(w)} vs {len(scores)}) -- skipping")
                     continue
                 hs, _ = np.histogram(scores, bins=MVA_BINS, weights=w)
+                hs2, _ = np.histogram(scores, bins=MVA_BINS, weights=w ** 2)
                 histograms[f"{proc}_{syst}{direction}"] = hs.astype(np.float64)
+                histograms_var[f"{proc}_{syst}{direction}"] = hs2.astype(np.float64)
 
     if len(zx_scores) > 0:
         h, _ = np.histogram(zx_scores, bins=MVA_BINS, weights=zx_weights)
+        h2, _ = np.histogram(zx_scores, bins=MVA_BINS, weights=zx_weights ** 2)
         histograms["ZX"] = h.astype(np.float64)
+        histograms_var["ZX"] = h2.astype(np.float64)
         print(f"  {'ZX':<15} {len(zx_scores):>10} {h.sum():>14.4f}")
     else:
         histograms["ZX"] = np.zeros(n_bins)
+        histograms_var["ZX"] = np.zeros(n_bins)
 
-    return histograms
+    return histograms, histograms_var
 
 
 # ---------------------------------------------------------------------------
 # Write ROOT file
 # ---------------------------------------------------------------------------
 
-def write_root_file(histograms, output_dir, filename="histograms_mva_with_zx.root",
-                     include_zx=True):
+def write_root_file(histograms, histograms_var, output_dir,
+                     filename="histograms_mva_with_zx.root", include_zx=True):
+    """
+    Each MC/ZX template is written as a Weight()-storage `hist.Hist` so its true
+    per-bin variance (sum of w^2, from build_histograms) lands in the ROOT
+    file's TH1::fSumw2 array, instead of the previous bare-(values,edges)-tuple
+    write (which leaves fSumw2 empty and forces a Poisson-proxy fallback on
+    readback -- exactly zero variance for negative-content bins, an
+    underestimate everywhere else). This is what was silently starving
+    autoMCStats of real per-bin statistics. See
+    create_datacards_ctag2d_100150.py's write_root_file docstring for the full
+    investigation (found + fixed 2026-09-17, confirmed converges in ~24s where
+    the old files failed to converge at all after 11.5h).
+    """
     path = os.path.join(output_dir, filename)
     nominal_procs = ["Signal", "ggZZ", "qqZZ", "Other_Higgs"] + (["ZX"] if include_zx else [])
     with uproot.recreate(path, compression=None) as f:
         for proc, h in histograms.items():
             if proc == "ZX" and not include_zx:
                 continue  # --skip-zx: never write the ZX histogram at all
-            f[f"h_{proc}"] = (h, MVA_BINS)
+            hw = hist.Hist(hist.axis.Variable(MVA_BINS), storage=hist.storage.Weight())
+            hw.view().value = h
+            hw.view().variance = histograms_var[proc]
+            f[f"h_{proc}"] = hw
         # Asimov data_obs = sum of NOMINAL process histograms only -- must not
         # include the systematic-varied Up/Down histograms also stored here.
+        # Left as a plain tuple deliberately -- Combine's binned likelihood
+        # treats observed data as Poisson-counted by construction, it doesn't
+        # read Sumw2 off data_obs.
         data_obs = sum(histograms[p] for p in nominal_procs if p in histograms)
         f["h_data_obs"] = (data_obs, MVA_BINS)
     print(f"\n  ROOT file: {path}")
@@ -930,14 +966,15 @@ def main():
 
     # 3. Build histograms
     print("\n[3] Building histograms")
-    histograms = build_histograms(mc_data, zx_scores, zx_weights)
+    histograms, histograms_var = build_histograms(mc_data, zx_scores, zx_weights)
     if args.skip_zx:
         histograms.pop("ZX", None)
+        histograms_var.pop("ZX", None)
 
     # 4. Write output
     print("\n[4] Writing output")
     root_filename = "histograms_mva_with_zx.root" if not args.skip_zx else "histograms_no_zx.root"
-    root_file = write_root_file(histograms, args.output, filename=root_filename, include_zx=not args.skip_zx)
+    root_file = write_root_file(histograms, histograms_var, args.output, filename=root_filename, include_zx=not args.skip_zx)
     dc_path = write_datacard(histograms, os.path.basename(root_file), args.output, include_zx=not args.skip_zx, automcstats_threshold=args.automcstats_threshold)
 
     print_summary(histograms, include_zx=not args.skip_zx)
