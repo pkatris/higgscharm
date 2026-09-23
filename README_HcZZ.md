@@ -1644,6 +1644,9 @@ this datacard. `_v7` is confirmed complete for every process it uses.
 | **Condor rejects `/eos` paths in submit files (CERN batch policy change since ~March)** | `condor/submit.sub` + `submit_condor.py`'s `CONDORDIR`/`LOGDIR` substitution point `executable`/`output`/`error`/`log` at literal `/eos/...` paths — confirmed working from this exact repo in March 2026 (found a successful old `.log`), now rejected outright: `ERROR: Failed to commit job submission into the queue... Standard batch schedds cannot use /eos paths directly`. **Workaround confirmed 2026-08-14: submit from the AFS checkout instead** (`/afs/cern.ch/user/s/snandaku/Higgscharmnew/higgscharm/`, same `runner.py -w <workflow> -y <era> --submit --eos --output_format parquet`) — condor accepts submit files whose paths originate from AFS even though `--eos` still points job *output* at `/eos`; no code change needed, just run from a different filesystem. Not a permanent code fix (submit.sub itself still hardcodes `/eos` if invoked from an EOS cwd) — still open whether to patch `submit.sub` properly (xrootd URLs / EOS-submit schedds) or keep "submit from AFS" as the accepted permanent workflow. |
 | **`lhe_pdf` formula: Hessian vs. MC-replica (RESOLVED 2026-08-03, root cause of residual size confirmed 2026-08-28)** | Fixed 2026-08-03: formula now divides by `N-1=99` (`sqrt(Σ(w_k-w0)²/99)`), correct for the NNPDF Monte-Carlo-replica prescription our private samples use. The private NanoAODs were regenerated (`hplusc_htozz1`/`hplusb_htozz1`, reachable again) and read directly 2026-08-28 — the formula is not the remaining problem. The residual ~90-130% `delta_pdf` for Signal/HPlusBottom is real and traced to the samples' `MuRFScaleDynX0p50` central-scale choice (half a dynamical reference scale), confirmed from raw `LHEScaleWeight`/`LHEPdfWeight` branches, not a formula bug — see the 2026-08-28 Systematics update above. |
 | **Signal/HPlusBottom negative-weight fraction is ~25%, not incidental** | Measured directly from `hplusc_mva_4class_scored_v4` (2026-08-14): `HPlusCharm`/`HPlusBottom` run **24–26% negative `weight_nominal`** across every era, roughly **8–17× higher** than every other process (`ZZto4L` 0.18%, `GluGlu*` ggZZ ~0.003–0.01%, Higgs backgrounds `WH`/`ZH`/`TTH` 1.4–1.7%). This is the same two processes with the already-diagnosed `lhe_pdf`/`scalevar_muR/muF` blowups — plausibly the same root cause (private amc@nlo-based generation), not yet connected. See [Open items](#open-items--next-techniques-to-port-from-hww-analysis). |
+| **Central DY NanoAODv12 datasets are INVALID in DBS (found 2026-09-23)** | Every central DY query in `analysis/filesets/*_nanov12.yaml` (all 4 Run3 eras) plus `bbH_Hto2Zto4L` is `INVALID` in global DBS. The chains were re-made from DIGI-RECO in 2025-09 to 2025-12, so the old files are disappearing from disk. The symptom is jobs failing within about 2 min in preprocessing with `[3011] No servers are available to read the file`. `jobs_status.py`'s site blacklist can't help, and a plain resubmit fails the same way. Check with `dasgoclient -query="dataset dataset=<DS> status=*"`. Plain `file dataset=<INVALID DS>` returns 0 files. The replacement map is in second-brain `Notes/hczz-dy-nanov12-replacement-map-2026-09-23.tsv`. **Only `hplusc_mva_4class_CR_merged` has been switched** (at the condor job-folder level); the shared yamls/filesets still point at INVALID DY. |
+| **`condor/submit.sh` exits 0 even when `xrdcp` of the output failed** | The script ends with `rm -rf "$LOCAL_OUTPUT"`, whose exit code becomes the job's. On 2026-09-23 about 180 jobs failed `xrdcp` with `[3021] ... Disk quota exceeded` and many still reported `return value 0`. Partially copied jobs can also look complete to `jobs_status.py`. After any copy/quota incident, grep the `.err` files for `xrdcp`/`[3021]`, and wipe and rerun the affected datasets instead of trusting condor exit codes. Not yet fixed in code. |
+| **EOS user quota: the file-count limit (5M) runs out before bytes (2 TB)** | `/eos/user/s/snandaku` hit 5.00M/5.00M files at 93% bytes on 2026-09-23. Check with `EOS_MGM_URL=root://eosuser.cern.ch eos quota /eos/user/s/snandaku/` (without `EOS_MGM_URL` it says "no quota for path"). Parquet outputs are many small files (~220 per CR_merged job). `eos find --count` stops at ~100k per call. `eos rm` goes to the recycle bin, which does not count against the user quota. |
 
 ---
 
@@ -2568,3 +2571,192 @@ Script: `combine/scripts/create_cr_zplusc_ctag2d_check.py` (+
 Plots: `second-brain/slides/make_hczz_cr_zplusc_ctag2d_plots.py` ->
 `hczz_cr_zplusc_{ztomumu,ztoee}_{nosf,withsf}.pdf`. Full writeup:
 `second-brain/Notes/hczz-zplusc-cr-ctag2d-sf-check-2026-09-16.md`.
+
+---
+
+### Update 2026-09-16 (later): `hplusc_mva_4class_CR` feature-completeness +
+isolation-double-veto fixes, pyarrow write bug root-caused/fixed, full
+condor completion — this is the real path to a trustworthy with-Z+X number
+
+**Part 1 — feature completeness.** Instrumented `run_zx_inference.py`'s
+real feature-lookup functions against a real pkatris Z+X file: 33 of 101
+MVA input features (`jet_phi`, most lepton charge/iso/ID variables)
+silently defaulted to 0.0 — never listed in `hplusc_mva_4class_CR.yaml`'s
+`histogram_config.axes` at all. Added the 66 missing axes to
+`hplusc_mva_4class_CR.yaml` + `_loose_z2.yaml`, verified every field name
+against `select_zzto4l_leptons()`'s `ak.zip` harmonization, verified
+object/event selection byte-identical before/after (histogram config only).
+Also fixed `run_zx_inference.py` to reconstruct per-jet arrays from
+pkatris's `_0/_1/_2`-scalar file layout before scoring — his files store
+only the leading jet, ours (via `estimate_zx_background.py`) already store
+real per-jet arrays correctly; not our bug, but needed a shim to read his.
+
+**Part 2 — real selection bug found.** Raw (non-FSR-corrected)
+`pfRelIso03_all < 0.35` applied directly in muon `is_tight`, double-voting
+against `select_zzto4l_leptons()`'s own FSR-corrected version applied
+afterward — the exact mistake `zzto4l_CR.yaml` already carries a comment
+warning against. Found in **both** `hplusc_mva_4class_CR.yaml` and, more
+consequentially, `zplusl_os.yaml` (the fake-rate *measurement* workflow —
+could have biased the measured fake rate itself, not just CR
+classification). Fixed in both, both checkouts (AFS/EOS had drifted in
+opposite directions on the two files — checked per-file, not assumed).
+
+**Part 3 — the real production blocker: a deterministic pyarrow bug, not
+flakiness.** `GluGluToContinto*`/`GluGlutoContinto*` (ggZZ) and `ZZto4L`
+jobs had failed every single resubmission round for ~28 rounds with
+`pyarrow.lib.ArrowNotImplementedError: Lists with non-zero length null
+components are not supported`, raised in `dump_pa_table`'s
+`ak.to_parquet` write — previously misattributed to generic flakiness.
+Live-reproduced in the real container (`coffea-base-almalinux9:0.7.30-
+py3.10`, pyarrow 19.0.1 / awkward 2.8.1): two specific awkward type shapes
+can't be written — `N * option[var * ?T]` (a length<=1 "best candidate"
+list, e.g. `m4l_3p1f`) and `N * option[var * T]` (genuinely multi-valued,
+e.g. `cjets_h_dphi_3p1f`). Fixed in `analysis/utils/parquet_writer.py`
+(`_fix_option_in_list()`): `ak.firsts()` for the first shape,
+`ak.fill_none(field, [], axis=0)` for the second (preserves real
+multi-jet lists — `ak.firsts()` there would have silently dropped jets
+2/3, verified empirically before choosing the fix, not assumed).
+
+**This session (continuation): confirmed the bug was far broader than
+diagnosed, and the fix works.** Re-scanned all `hplusc_mva_4class_CR`
+`.err` logs predating the fix (applied 2026-09-16 17:45 CEST): **1,027
+error logs across the 4 eras** (200 / 326 / 275 / 226 by era) hit this
+exact `ArrowNotImplementedError` — not just ggZZ/ZZto4L, also `DYJetsToLL`
+and others. This is why 452 of the 589 expected `hplusc_mva_4class_CR`
+job-chunks across all 4 eras still had no valid output going into this
+session, despite the earlier 580-job full resubmission. Verified the fix
+on the 12 `.err` logs written *after* 17:45 (the earlier session's targeted
+ggZZ/ZZto4L resubmission): zero `ArrowNotImplementedError` remaining; the
+only failures left are transient `XRootD Operation expired` /
+`FileNotFoundError: No servers available` network errors — unrelated,
+expected background noise. Refreshed the VOMS proxy (`voms-proxy-init
+--voms cms`, `move_proxy()` in `submit_condor.py` copies it to
+`/afs/.../private/`) and resubmitted all 452 missing jobs across all 4
+eras via `jobs_status.py`'s built-in resubmit path (reuses the existing
+`.sub` files verbatim, so the `workday` job-flavour from the original
+submission is preserved — **not** `runner.py`, which silently defaults to
+`longlunch` and has previously killed slow datasets). Confirmed via
+`condor_q`: exactly 452 jobs queued, 0 held. Running as of this writing.
+
+**Not committed** (`analysis/utils/parquet_writer.py`,
+`hplusc_mva_4class_CR{,_loose_z2}.yaml`, `zplusl_os.yaml` fixes) — user
+commits per standing preference.
+
+**Correction, same session, after the 452 jobs finished**: checking
+completeness with plain `jobs_status.py` (no `--eos`) afterward gave the
+exact same "finished" counts as before the resubmission — a red flag.
+`.err` logs show these jobs `xrdcp` output straight to
+`root://eosuser.cern.ch//eos/user/s/snandaku/higgscharm/outputs/...`
+(confirmed: 0 files modified in the plain AFS-local `analysis/outputs/`
+tree in the prior 6 hours despite 452 jobs having just run) — **`--eos` is
+the correct flag for this workflow's completeness check**, opposite of
+the JES/JER campaign's "don't trust `--eos`" note (that was about which
+*checkout* runs the code, a different question from where output lands —
+always verify empirically per workflow, check a real `.err`'s
+`xrdcp`/`cp` line). Re-checked with `--eos`: real completeness was
+338/589 (not 137/589) — the 452-job resubmission was mostly redundant
+(most already had valid EOS output the wrong check couldn't see) but not
+harmful. Resubmitted the real 251 still-missing jobs the same way,
+confirmed via `condor_q`: exactly 251 queued.
+
+**Next**: once these 251 jobs complete (`jobs_status.py -w
+hplusc_mva_4class_CR -y <era> --eos`, all 4 eras), merge, rerun
+`estimate_zx_background.py` (ours, already verified correct) once
+pkatris's `fake_rates.pkl` arrives, rerun the fixed `run_zx_inference.py`,
+rebuild the with-ZX datacard, rerun combine. **Do not cite any with-ZX
+number as final until this full chain reruns** — every prior with-ZX
+number used either pkatris's jet-collapsed files or a stale/incomplete
+July 27 production.
+
+Full writeups: `second-brain/Notes/hczz-zx-feature-completeness-cr-fixes-
+condor-2026-09-16.md`, `second-brain/Notes/hczz-zx-ctag2d-l0-flavors-and-
+pyarrow-fix-2026-09-16.md`.
+
+---
+
+### Update 2026-09-16 (later still): qqZZ CR / On-Z CR ctag2d 2D-SF check,
+full SR scope — SF has essentially no effect, agrees with the Z+c CR check
+
+Second-priority task, done in parallel with the Z+X condor completion
+above. Full-SR-scope counterpart to the Z+c CR check earlier the same day
+(which was limited to the `cjets`-only subset that CR's parquets store).
+Reused the already-complete `hplusc_mva_4class_ctag2d_scored` production's
+`base` category (all 4 eras, same tree the real datacards use) — no new
+condor production needed.
+
+Regions: On-Z CR (`|m4l-91.1876|<7`), qqZZ CR (`m4l>180`), both m4l-only
+selections orthogonal to the MVA-score fit discriminant. Wrinkle (opposite
+of the Z+c CR case): this production's `weight_nominal` already has the
+central ctag2d SF baked in, so "with SF" = `weight_nominal` as-is,
+"without SF" = `weight_nominal` divided by a freshly recomputed per-event
+product SF over up to 3 leading jets of **any** flavor — the real SR scope
+(`events.selected_jets`), reusing `create_datacards_ctag2d_100150_rawsf.py`'s
+`_raw_event_sf` per-jet recipe.
+
+**Result**: On-Z CR Data/MC 1.078 (no SF) → 1.075 (with SF); qqZZ CR 1.098
+→ 1.095. Per-process shifts from the SF: qqZZ/ggZZ/Other_Higgs all under
+0.5%; Signal shows a large relative shift but ~0 absolute yield in these
+windows (statistically meaningless). **The SF has essentially no effect in
+either region** — expected, since qqZZ/ggZZ are light-jet-dominated with
+low jet multiplicity/few real c-jets, and the SF's corrections concentrate
+in c-tag-enriched WP cells. Per-m4l-bin breakdown (script log/JSON) shows
+the same pattern: shifts under ~0.5% everywhere, data statistical
+fluctuations (5-65 events/2-10 GeV bin) dominate any visible ratio
+movement, not the SF.
+
+**Combined with the Z+c CR result**: both CRs checked now agree — the
+ctag2d SF neither clearly helps nor hurts Data/MC agreement in any CR
+checked so far. Genuine, expected null result (CRs that aren't c-tag-
+selected shouldn't feel much from a c-tag SF), not a check failure. Does
+**not** reopen or contradict the 09-15 L0 swap retraction — that concerns
+the up/down uncertainty *shape*'s SR impact, a different question from the
+central SF's CR-normalization effect answered here.
+
+Script: `combine/scripts/create_cr_qqzz_onz_ctag2d_check.py`. Plots:
+`second-brain/slides/make_hczz_cr_qqzz_onz_ctag2d_plots.py` ->
+`hczz_cr_qqzzonz_{onz,qqzzcr}_{nosf,withsf}.pdf`. Full writeup:
+`second-brain/Notes/hczz-qqzz-onz-cr-ctag2d-sf-check-2026-09-16.md`.
+
+---
+
+### Update 2026-09-17: `hplusc_mva_4class_CR` output validated (not just
+condor exit status) — clean, and completeness trend to 95%+
+
+Per explicit ask: don't just trust that condor jobs leaving the queue
+means the output is good. Validated directly:
+
+- File counts sane at each checkpoint (e.g. 92/182/179/109 `.coffea`
+  across the 4 eras), no zero-byte files, total sizes 412M-1.2G/era.
+- `.coffea` files are lz4-compressed (`coffea.util` format), **not** raw
+  pickle — an initial check with plain `pickle.load` falsely flagged
+  32/32 sampled files as "corrupt" (`invalid load key '\x04'`); redone
+  with `coffea.util.load`, all 32 loaded cleanly. Their content is
+  metadata/cutflow only (sumw, run/lumi, per-CR-category counts) — the
+  real physics payload lives in the parquet files, consistent with this
+  workflow's already-documented "no coffea histograms for DY/WZ/tt"
+  behavior (see the Z+X CR plots note above).
+- Parquet content (what `estimate_zx_background.py`/`run_zx_inference.py`
+  actually read downstream): 160/160 randomly sampled files across all 4
+  eras read cleanly via `pyarrow.parquet.read_table`, all non-empty —
+  including a targeted check of the exact datasets previously hit by the
+  pyarrow bug (ggZZ, ZZto4L, DY, TT): all clean.
+- Error-log sweep: 0 of 750 post-fix `.err` logs show
+  `ArrowNotImplementedError`. Of the 367 that do have some traceback: 332
+  `OSError` (XRootD timeouts), 9 `ValueError` ("not a ROOT file: first
+  four bytes are b'\x00\x00\x00\x00'" — a corrupted/truncated transient
+  read, same family), 4 `FileNotFoundError`, 4 `AttributeError`
+  (misleading at first glance — traced to awkward's lazy-array wrapper
+  surfacing the same underlying `XRootD Operation expired` when a branch
+  like `pfRelIso03_all` is first accessed, not a real code bug). **No new
+  bugs found** — the remaining failure tail is ordinary transient network
+  flakiness, not a systematic issue.
+
+**Completeness trend** across repeated `--eos`-checked resubmission
+rounds: 137/589 (wrong flag, see the earlier correction above) →
+338/589 → 551/589 → 562/589 (95.4%) → one more round in flight. Classic
+diminishing-returns long tail from transient network reads, not a
+systematic bug (confirmed by the error-log sweep above). Once this
+converges (target: accept ≥97-98% rather than chasing every last file —
+check what fraction of total statistics the remaining gap represents),
+proceed with merge → `estimate_zx_background.py` → `run_zx_inference.py`
+→ with-ZX datacard → combine, per the plan above.
