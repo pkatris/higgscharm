@@ -677,10 +677,19 @@ def load_jecshifts_scored_parquets(jecshifts_dir, sumw_by_proc):
 
 def load_zx_parquets(zx_dir):
     """
-    Load all eras, 3P1F + 2P2F. Events already in mass window.
+    Load all eras, 3P1F + 2P2F, applying MASS_WINDOW to the Z+X events here.
     Returns (scores array, weights array).
+
+    Found 2026-09-23: this used to assume the input was already windowed.
+    That holds for estimate_zx_background.py output, but pkatris's
+    zx_background_mva_pkatris files are inclusive in m4l (70-2231 GeV), so
+    every with-ZX card built on them carried the inclusive Z+X yield (133.24)
+    instead of the [100,150] one (43.83). Cutting here makes the card
+    independent of how the Z+X producer windowed its output. Same edge
+    convention as the MC loader: [lo, hi).
     """
     all_scores, all_weights = [], []
+    n_in = n_out = 0
     for era in ERAS:
         for cr in ("3p1f", "2p2f"):
             fp = os.path.join(zx_dir, era, f"zx_{cr}_{era}_mva.parquet")
@@ -688,8 +697,20 @@ def load_zx_parquets(zx_dir):
                 print(f"  WARNING: missing {fp}")
                 continue
             df = pd.read_parquet(fp)
-            all_scores.append(df["mva_score_Signal"].values)
-            all_weights.append(df["zx_weight"].values)
+            if "m4l" not in df.columns:
+                raise KeyError(f"{fp} has no 'm4l' column -- cannot apply the "
+                               f"{MASS_WINDOW} GeV window to Z+X")
+            m4l = np.array([x[0] if hasattr(x, "__len__") and len(x) else
+                            (np.nan if hasattr(x, "__len__") else x)
+                            for x in df["m4l"].values], dtype=float)
+            win = (m4l >= MASS_WINDOW[0]) & (m4l < MASS_WINDOW[1])
+            n_in += int(win.sum())
+            n_out += int((~win).sum())
+            all_scores.append(df["mva_score_Signal"].values[win])
+            all_weights.append(df["zx_weight"].values[win])
+    if n_out:
+        print(f"  ZX: dropped {n_out} of {n_in + n_out} events outside "
+              f"m4l {MASS_WINDOW} GeV")
 
     if not all_scores:
         return np.array([]), np.array([])
@@ -1062,7 +1083,10 @@ def write_datacard(histograms, root_filename, output_dir, include_zx=True, autom
             # zx_background_mva_pkatris parquets this datacard reads):
             # sqrt(sum(zx_weight_sq))/sum(zx_weight) = 5.61% across all 4 eras
             # (net yield 133.2386, matches this script's own load_zx_parquets
-            # output exactly). That's much smaller than 30%, consistent with
+            # output exactly -- NOTE 2026-09-23: 133.24 is pkatris's inclusive-
+            # m4l yield, fed in unwindowed by the old load_zx_parquets; the
+            # [100,150] yield is 43.83, and the current CR_merged estimate is
+            # 32.60). That's much smaller than 30%, consistent with
             # the official uncertainty being dominated by the misID-rate/
             # composition systematics rather than raw CR statistics for a
             # large real dataset -- not a contradiction. The misID-variation
@@ -1102,9 +1126,13 @@ def write_datacard(histograms, root_filename, output_dir, include_zx=True, autom
                 jec_rows_written = True
             dc.write(syst_row(syst, "shape", vals))
 
-        if include_zx:
-            dc.write(f"\n# ZX normalization floats freely in the fit (data-driven)\n")
-            dc.write(f"ZX_rate  rateParam  hczz  ZX  1.0  [0.1,10.0]\n")
+        # No free ZX rateParam (removed 2026-09-23). There is no Z+X control
+        # region in this fit, so a free ZX_rate [0.1,10] was constrained only by
+        # the SR Asimov itself (-42%/+55% at 32.6 events), double-counting
+        # ZX_norm (whose impact it reduced to ~0) and inflating the Z+X impact
+        # (#3, 83). The fake-rate Z+X normalization is carried by the ZX_norm
+        # lnN alone, as in HIG-24-013 (25-46% lnN) and Felix Heyen's thesis
+        # (100% lnN). Limit effect: 353.0 -> 352.5.
 
         # autoMCStats: OFF BY DEFAULT since 2026-08-19 (was silently on-by-default
         # 2026-08-18/19, a real regression against the standing decision below --

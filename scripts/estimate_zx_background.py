@@ -266,7 +266,14 @@ _FILESET_YAML = {
     '2023postBPix': '/afs/cern.ch/user/s/snandaku/Higgscharmnew/higgscharm/analysis/filesets/2023postBPix_nanov12.yaml',
 }
 _LUMI_FB = {'2022preEE': 7.98, '2022postEE': 26.67, '2023preBPix': 17.79, '2023postBPix': 9.53}
-_SR_BASE  = "/eos/user/s/snandaku/higgscharm/outputs/hplusc"
+# Generated-sumw source for the ZZ-in-3P1F correction: the dedup'd per-chunk
+# sumw/*.json sidecars of the ctag2d production (the same denominator the
+# [100,150] datacard uses for its MC). Was outputs/hplusc/*.coffea until that
+# directory was deleted 2026-09-23 -- the lookup then silently returned 0 and
+# the ZZ correction became 1.0 in every era. Same input files as the CR
+# productions (e.g. ZZto4L 82/208/.../81 files). CR_merged's own .coffea were
+# not used: 2022postEE ZZto4L has only 7/14 of them (silent xrdcp failures).
+_SUMW_BASE = "/eos/user/s/snandaku/higgscharm/outputs/hplusc_mva_4class_ctag2d"
 
 
 def _load_xsec(year, sample_key):
@@ -280,25 +287,57 @@ def _load_xsec(year, sample_key):
     return float(fs.get(sample_key, {}).get('xsec', 0))
 
 
-def _get_sumw_from_coffea(year, dataset_prefix):
-    """Sum 'sumw' metadata from SR coffea files for dataset_prefix* in given year."""
-    try:
-        import sys
-        hc_path = '/afs/cern.ch/user/s/snandaku/Higgscharmnew/higgscharm'
-        if hc_path not in sys.path:
-            sys.path.insert(0, hc_path)
-        from coffea.util import load as coffea_load
-    except ImportError:
-        return 0.0
+def _load_coffea_file(path):
+    """
+    Decompress+unpickle a .coffea file directly (lz4 frame + pickle), the
+    same format coffea.util.load() reads, WITHOUT importing coffea.util.
 
+    Found 2026-09-18: `from coffea.util import load` unconditionally does
+    `import numba` at coffea/util.py's top level, regardless of whether
+    load() itself touches any numba-jitted code. In this environment
+    (miniforge3 python, numpy 2.4.3) the only numba installed anywhere
+    (~/.local/lib/python3.12/site-packages, pulled in via user-site
+    auto-inclusion) requires numpy<=2.3 and raises ImportError at import
+    time. The caller here used to catch exactly that ImportError and
+    silently return 0.0 -- so EVERY call to _get_sumw_from_coffea has been
+    silently returning 0.0 in this environment, which in turn made every
+    era's qqZZ/ggZZ-in-3P1F correction factor silently default to a no-op
+    1.0 (see estimate_zx_background()'s "could not compute qqZZ
+    correction... sumw=0.0" warning -- previously assumed to mean "no MC
+    present", actually an environment bug having nothing to do with the
+    data). coffea's own save()/load() is just lz4.frame-compressed pickle
+    (confirmed by reading a real file's raw bytes: LZ4 frame magic 0x18224D04
+    at offset 0) -- reproducing that here avoids the numba import entirely.
+    """
+    import lz4.frame
+    import pickle
+    with open(path, 'rb') as f:
+        return pickle.loads(lz4.frame.decompress(f.read()))
+
+
+def _get_sumw_from_coffea(year, dataset_prefix):
+    """
+    Generated sum of genWeight for dataset_prefix* in given year, from the
+    _SUMW_BASE sumw/*.json sidecars. One sidecar per processing chunk; the
+    filename (<guid>_<chunk range>.json) identifies the chunk, so keep one
+    copy per filename (resubmissions write the same chunk into several
+    partition dirs), same dedup as create_datacards_ctag2d_100150.load_sumw.
+    Raises instead of returning 0 -- a zero here used to silently disable the
+    ZZ correction.
+    """
+    import json
+    latest = {}
+    for jf in glob(os.path.join(_SUMW_BASE, year, f"{dataset_prefix}*", "sumw", "*.json")):
+        name = os.path.basename(jf)
+        if name not in latest or os.path.getmtime(jf) > os.path.getmtime(latest[name]):
+            latest[name] = jf
     total = 0.0
-    for cf in glob(os.path.join(_SR_BASE, year, f"{dataset_prefix}*", "*.coffea")):
-        try:
-            out = coffea_load(cf)
-            if isinstance(out, dict) and 'metadata' in out:
-                total += float(out['metadata'].get('sumw', 0))
-        except Exception:
-            pass
+    for jf in latest.values():
+        with open(jf) as f:
+            total += float(json.load(f)['sumw'])
+    if total <= 0:
+        raise RuntimeError(f"No generated sumw for {dataset_prefix}* in {year} under "
+                           f"{_SUMW_BASE} -- refusing to run with the ZZ correction disabled")
     return total
 
 
@@ -355,13 +394,11 @@ def compute_zz_correction(year, category="CR_3P1F", df_data=None):
     # ── qqZZ contribution (ZZto4L) ─────────────────────────────────────────
     xs_qq   = _load_xsec(year, 'ZZto4L')   # pb
     sumw_qq = _get_sumw_from_coffea(year, 'ZZto4L')
-    if sumw_qq > 0 and xs_qq > 0:
-        xs_norm_qq  = xs_qq * 1000 * lumi / sumw_qq   # fb → expected yield per unit weight
-        raw_qq      = _sum_wnominal_from_cr(year, 'ZZto4L', category, m4l_min, m4l_max)
-        n_zz_qq     = raw_qq * xs_norm_qq
-    else:
-        n_zz_qq = 0.0
-        print(f"  Warning: could not compute qqZZ correction for {year} (xs={xs_qq}, sumw={sumw_qq})")
+    if xs_qq <= 0:
+        raise RuntimeError(f"No ZZto4L cross section for {year} -- cannot compute the ZZ correction")
+    xs_norm_qq  = xs_qq * 1000 * lumi / sumw_qq   # fb → expected yield per unit weight
+    raw_qq      = _sum_wnominal_from_cr(year, 'ZZto4L', category, m4l_min, m4l_max)
+    n_zz_qq     = raw_qq * xs_norm_qq
 
     # ── ggZZ contribution (GluGluto/GluGluToContinto) ──────────────────────
     # Sum over all relevant gg→ZZ samples (4e, 4mu, 2e2mu)
@@ -373,10 +410,11 @@ def compute_zz_correction(year, category="CR_3P1F", df_data=None):
     ]:
         xs_gg   = _load_xsec(year, sample_key)
         sumw_gg = _get_sumw_from_coffea(year, folder_prefix)
-        if sumw_gg > 0 and xs_gg > 0:
-            xs_norm = xs_gg * 1000 * lumi / sumw_gg
-            raw     = _sum_wnominal_from_cr(year, folder_prefix, category, m4l_min, m4l_max)
-            n_zz_gg += raw * xs_norm
+        if xs_gg <= 0:
+            raise RuntimeError(f"No {sample_key} cross section for {year}")
+        xs_norm = xs_gg * 1000 * lumi / sumw_gg
+        raw     = _sum_wnominal_from_cr(year, folder_prefix, category, m4l_min, m4l_max)
+        n_zz_gg += raw * xs_norm
 
     n_zz_mc = n_zz_qq + n_zz_gg
 
