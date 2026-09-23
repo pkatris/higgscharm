@@ -1281,4 +1281,3 @@ histogram_config:
       - cjets_phi
       - cjets_h_dphi_3p1f
       - cjets_h_dphi_2p2f
-      - cjets_h_dphi_2p2f

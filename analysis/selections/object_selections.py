@@ -405,6 +405,30 @@ class ObjectSelector:
             self.objects["zllcandidates"], "is_sscr"
         )
 
+    # 2026-09-21: OS/SS-split-aware variants for hplusc_mva_4class_CR_merged.yaml
+    # (pkatris's design -- separate zllcandidates_os (mass>70) / zllcandidates_ss
+    # (mass>100) objects, instead of the single "zllcandidates" object the three
+    # functions above are hardcoded to). Added as new, separate functions rather
+    # than parameterizing the existing ones, so hplusc_mva_4class_CR.yaml's
+    # current production usage of the functions above is completely untouched.
+    def select_best_1fcr_zllcandidate_os(self, obj_name):
+        """selects best Zll candidates for 3P1F CR (OS/SS-split zllcandidates_os)"""
+        self.objects[obj_name] = select_best_zzcandidate(
+            self.objects["zllcandidates_os"], "is_1fcr"
+        )
+
+    def select_best_2fcr_zllcandidate_os(self, obj_name):
+        """selects best Zll candidates for 2P2F CR (OS/SS-split zllcandidates_os)"""
+        self.objects[obj_name] = select_best_zzcandidate(
+            self.objects["zllcandidates_os"], "is_2fcr"
+        )
+
+    def select_best_sscr_zllcandidate_ss(self, obj_name):
+        """selects best Zll candidates for SS CR (OS/SS-split zllcandidates_ss)"""
+        self.objects[obj_name] = select_best_zzcandidate(
+            self.objects["zllcandidates_ss"], "is_sscr"
+        )
+
     def select_mass_4e_1fcr(self, obj_name):
         self.objects[obj_name] = select_candidate_mass(
             self.objects["best_zllcandidate_1fcr"], "4e"
