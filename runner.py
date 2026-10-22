@@ -42,7 +42,7 @@ if __name__ == "__main__":
         "--nfiles",
         dest="nfiles",
         type=int,
-        default=15,
+        default=10,
         help="number of root files to include in each dataset partition (default 15)",
     )
     parser.add_argument(

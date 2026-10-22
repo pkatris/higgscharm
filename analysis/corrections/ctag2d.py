@@ -1,7 +1,19 @@
-"""PNet 2D pseudo-continuous HF-tagging scale factor (ParticleNetAK4_pseudocontinuous).
+"""PNet / UParT 2D pseudo-continuous HF-tagging scale factor.
 
 Preliminary "2D_HF_Tagging" SF (correction_files["ctagging_2d"]), distinct from the 1D
 fixed-WP CTagCorrector (BTV particleNet_wc/tnp/light, ctag.py) this is meant to replace.
+Tagger per era: ParticleNetAK4_pseudocontinuous (btagPNetCvL/CvB) for 2022/2023,
+UParTAK4_pseudocontinuous (btagUParTAK4CvL/CvB) for 2024 -- see TAGGER_BY_ERA.
+
+**2024 SUPPORT ADDED 2026-10-21**: 2024 UParTAK4 category boundaries added to
+BOUNDARIES_BY_ERA from the 2D HF-tagging WP-definition table (score(HF vs. LF) /
+score(B vs. C) columns: L0 <=0.250; C0 (0.250,0.452]; C1 (0.452,0.808]; C2-C4 and B0-B4
+at HFvLF>0.808 split in BvC at 0.006/0.017/0.055/0.761/0.944/0.985/0.995). Same
+(x, y) transform as 2022/2023 (x=HFvLF from CvL/CvB, y=BvC=1-CvB), but fed with the
+UParT discriminants since the 2024 SF file is calibrated for UParTAK4.
+Also fixed: jets with tagger default scores (e.g. -1, so y=1-CvB=2 lands outside [0,1])
+were caught by the closed-corner B4 fallback and given B4 SFs; inputs are now required to
+lie in [0,1]x[0,1], and out-of-range jets get SF=1 as originally intended.
 
 WP-code mapping (0=L0, 40-44=C0-C4, 50-54=B0-B4) and the (syst, flavor, wp, abseta, pt)
 evaluate order were ported from `Chirayu18/higgscharm` (`hww-analysis` branch,
@@ -18,9 +30,7 @@ actually need. Real per-era PNet boundaries (source: HiggsDNA metaconditions Era
 "HPC_ctag_WPs" block, independently confirmed 2026-08-14 by the user pasting that exact JSON)
 were already correctly implemented in this repo at
 `b-hive_ttcc/utils/coffea_processors/lz4_hczz_processor.py::JET_TAG_BOUNDARIES_BY_ERA` --
-copied from there below rather than re-derived. The 2024 UParT boundaries are NOT needed here
-(this corrector is gated off for nano_version=="15" in correction_manager.py) and are not
-included.
+copied from there below rather than re-derived.
 
 The (x, y) coordinate transform itself was NOT the bug and needed no fix: `lz4_hczz_processor.
 py::compute_jet_categories` derives x=pBplusC=B+(1-B)*CvL, y=pBvsC=1-CvB from the B/CvB/CvL
@@ -92,11 +102,12 @@ WP_ID = {"L0": 0, "C0": 40, "C1": 41, "C2": 42, "C3": 43, "C4": 44,
          "B0": 50, "B1": 51, "B2": 52, "B3": 53, "B4": 54}
 CAT_TO_WP = np.array([WP_ID[c] for c in CATS], dtype=np.int64)
 
-# Per-era PNet 2D-category boundaries in (pBplusC=HFvLF, pBvsC=BvC=1-CvB) space, i.e.
-# {"x": (lo, hi), "y": (lo, hi)}. Source: HiggsDNA metaconditions Era2022_v1.json
-# "HPC_ctag_WPs" block, cross-confirmed 2026-08-14 against
+# Per-era 2D-category boundaries in (pBplusC=HFvLF, pBvsC=BvC=1-CvB) space, i.e.
+# {"x": (lo, hi), "y": (lo, hi)}. 2022/2023 (PNet) source: HiggsDNA metaconditions
+# Era2022_v1.json "HPC_ctag_WPs" block, cross-confirmed 2026-08-14 against
 # b-hive_ttcc/utils/coffea_processors/lz4_hczz_processor.py::JET_TAG_BOUNDARIES_BY_ERA
-# (byte-for-byte match). wp_id -> category: 0=L0, 40-44=C0-C4, 50-54=B0-B4.
+# (byte-for-byte match). 2024 (UParT) source: 2D HF-tagging WP-definition table
+# (added 2026-10-21). wp_id -> category: 0=L0, 40-44=C0-C4, 50-54=B0-B4.
 BOUNDARIES_BY_ERA = {
     "2022preEE": {
         "L0": {"x": (0.0,   0.160), "y": (0.0,   1.0)},
@@ -150,11 +161,32 @@ BOUNDARIES_BY_ERA = {
         "B3": {"x": (0.640, 1.000), "y": (0.969, 0.992)},
         "B4": {"x": (0.640, 1.000), "y": (0.992, 1.000)},
     },
+    "2024": {
+        "L0": {"x": (0.0,   0.250), "y": (0.0,   1.0)},
+        "C0": {"x": (0.250, 0.452), "y": (0.000, 1.000)},
+        "C1": {"x": (0.452, 0.808), "y": (0.000, 1.000)},
+        "C2": {"x": (0.808, 1.000), "y": (0.017, 0.055)},
+        "C3": {"x": (0.808, 1.000), "y": (0.006, 0.017)},
+        "C4": {"x": (0.808, 1.000), "y": (0.000, 0.006)},
+        "B0": {"x": (0.808, 1.000), "y": (0.055, 0.761)},
+        "B1": {"x": (0.808, 1.000), "y": (0.761, 0.944)},
+        "B2": {"x": (0.808, 1.000), "y": (0.944, 0.985)},
+        "B3": {"x": (0.808, 1.000), "y": (0.985, 0.995)},
+        "B4": {"x": (0.808, 1.000), "y": (0.995, 1.000)},
+    },
 }
 
-CORRECTION_NAME = "ParticleNetAK4_pseudocontinuous"
+# (correction name in the SF file, CvL branch, CvB branch) per era
+TAGGER_BY_ERA = {
+    "2022preEE": ("ParticleNetAK4_pseudocontinuous", "btagPNetCvL", "btagPNetCvB"),
+    "2022postEE": ("ParticleNetAK4_pseudocontinuous", "btagPNetCvL", "btagPNetCvB"),
+    "2023preBPix": ("ParticleNetAK4_pseudocontinuous", "btagPNetCvL", "btagPNetCvB"),
+    "2023postBPix": ("ParticleNetAK4_pseudocontinuous", "btagPNetCvL", "btagPNetCvB"),
+    "2024": ("UParTAK4_pseudocontinuous", "btagUParTAK4CvL", "btagUParTAK4CvB"),
+}
 NUIS_YEAR = {"2022preEE": "2022", "2022postEE": "2022",
-             "2023preBPix": "2023", "2023postBPix": "2023"}
+             "2023preBPix": "2023", "2023postBPix": "2023",
+             "2024": "2024"}
 # single-nuisance source keys, matching the hww-analysis reference (decision there: 2026-07-23,
 # Total; per-source decorrelation deferred to a whole-card decorrelation pass -- same deferral
 # applies here, not yet revisited).
@@ -165,13 +197,16 @@ PT_BINS = (20.0001, 9999.0)
 
 def _category_np(cvsl, cvsb, era):
     """Map (CvL, CvB) per jet to one of the 11 WP-code categories, using ERA-SPECIFIC
-    boundaries (they differ meaningfully between 2022*/2023* -- see BOUNDARIES_BY_ERA).
-    -1 = out of range (shouldn't happen: every era's boundaries tile [0,1]x[0,1])."""
+    boundaries (they differ meaningfully between eras -- see BOUNDARIES_BY_ERA).
+    -1 = invalid tagger input (NaN or outside [0,1], e.g. default -1 scores) -> SF=1."""
     den = cvsl + cvsb * (1.0 - cvsl)
     with np.errstate(invalid="ignore", divide="ignore"):
         x = np.where(den != 0, cvsl / den, np.nan)
     y = 1.0 - cvsb
-    good = np.isfinite(x) & np.isfinite(y)
+    good = (
+        np.isfinite(x) & np.isfinite(y)
+        & (x >= 0.0) & (x <= 1.0) & (y >= 0.0) & (y <= 1.0)
+    )
     cat = np.full(x.shape, -1, dtype=np.int64)
     boundaries = BOUNDARIES_BY_ERA[era]
     for name, bounds in boundaries.items():
@@ -179,26 +214,36 @@ def _category_np(cvsl, cvsb, era):
         y_lo, y_hi = bounds["y"]
         m = good & (x >= x_lo) & (x < x_hi) & (y >= y_lo) & (y < y_hi)
         cat[m] = CID[name]
-    # closed upper corner (x=1, y=1) falls just outside every "< hi" box -- assign it to
-    # whichever category owns the (x_hi, y_hi)=(1,1) corner (B4 always, per the tiling above).
-    edge = good & (cat < 0) & (x >= boundaries["B4"]["x"][0]) & (y >= boundaries["B4"]["y"][0])
-    cat[edge] = CID["B4"]
+    # closed upper edges (x=1 and/or y=1) fall just outside every "< hi" box -- assign them
+    # to the category owning that edge. y=1 at high x -> B4; x=1 at any y -> the high-x box
+    # containing y (handled by re-running the high-x boxes with x<=1 inclusive).
+    unassigned = good & (cat < 0)
+    if unassigned.any():
+        for name, bounds in boundaries.items():
+            x_lo, x_hi = bounds["x"]
+            y_lo, y_hi = bounds["y"]
+            m = (
+                unassigned & (x >= x_lo) & (x <= x_hi)
+                & (y >= y_lo) & ((y < y_hi) | ((y_hi == 1.0) & (y <= y_hi)))
+            )
+            cat[m & (cat < 0)] = CID[name]
     return cat
 
 
 class CTag2DCorrector:
     """
-    2D pseudo-continuous c-tag corrector, applied to every jet in `events.selected_jets`
-    (product across the event) -- same scope as ctag.py::CTagCorrector.
+    2D pseudo-continuous c-tag corrector, applied to the (up to 3) leading jets in
+    `events.selected_jets` (product across the event).
 
     Parameters:
     -----------
         events:
-            Events collection (must carry `selected_jets` with btagPNetCvL/CvB/hadronFlavour)
+            Events collection (must carry `selected_jets` with the era's CvL/CvB branches
+            -- see TAGGER_BY_ERA -- and hadronFlavour)
         weights:
             Weights container from coffea.analysis_tools
         year:
-            dataset year {2022preEE, 2022postEE, 2023preBPix, 2023postBPix}
+            dataset year {2022preEE, 2022postEE, 2023preBPix, 2023postBPix, 2024}
         variation:
             if 'nominal' (default), add nominal + up/down variations; else nominal only
             (matches ctag.py's convention in this repo -- NOT hww-analysis's `shift is None`
@@ -206,18 +251,29 @@ class CTag2DCorrector:
     """
 
     def __init__(self, events, weights: Type[Weights], year: str, variation: str = "nominal") -> None:
-        if year not in BOUNDARIES_BY_ERA:
+        if year not in BOUNDARIES_BY_ERA or year not in TAGGER_BY_ERA:
             raise ValueError(
-                f"CTag2DCorrector has no PNet category boundaries for year '{year}' "
-                f"(only {list(BOUNDARIES_BY_ERA)} are wired -- 2024/UParTAK4 needs its own "
-                f"boundary table, not yet added)."
+                f"CTag2DCorrector has no category boundaries/tagger config for year '{year}' "
+                f"(only {list(BOUNDARIES_BY_ERA)} are wired)."
             )
         self._year = year
         self._weights = weights
         self._variation = variation
-        self._corr = correctionlib.CorrectionSet.from_file(
-            correction_files["ctagging_2d"][year]
-        )[CORRECTION_NAME]
+        corr_name, cvl_branch, cvb_branch = TAGGER_BY_ERA[year]
+        cset = correctionlib.CorrectionSet.from_file(correction_files["ctagging_2d"][year])
+        if corr_name not in cset:
+            raise KeyError(
+                f"'{corr_name}' not found in {correction_files['ctagging_2d'][year]} "
+                f"(available: {list(cset.keys())})"
+            )
+        self._corr = cset[corr_name]
+        # evaluate() below assumes inputs (systematic, flavor, wp, abseta, pt)
+        input_names = [i.name for i in self._corr.inputs]
+        if len(input_names) != 5:
+            raise ValueError(
+                f"{corr_name} ({year}) has inputs {input_names}; expected 5 "
+                f"(systematic, flavor, wp, abseta, pt)"
+            )
         self._nuis = f"CMS_ctag2d_{NUIS_YEAR[year]}"
 
         # CAPPED 2026-08-31: at most the 3 leading (pT-descending, post-selection --
@@ -232,8 +288,8 @@ class CTag2DCorrector:
         jets = events.selected_jets[:, :3]
         self._nj = ak.num(jets)
         j = ak.flatten(jets)
-        self._cvsl = ak.to_numpy(ak.fill_none(j.btagPNetCvL, np.nan)).astype(np.float64)
-        self._cvsb = ak.to_numpy(ak.fill_none(j.btagPNetCvB, np.nan)).astype(np.float64)
+        self._cvsl = ak.to_numpy(ak.fill_none(j[cvl_branch], np.nan)).astype(np.float64)
+        self._cvsb = ak.to_numpy(ak.fill_none(j[cvb_branch], np.nan)).astype(np.float64)
         self._pt = ak.to_numpy(ak.fill_none(j.pt, np.nan)).astype(np.float64)
         flav = ak.fill_none(getattr(j, "hadronFlavour", ak.zeros_like(j.pt)), 0)
         self._flav = ak.to_numpy(flav).astype(np.int64)

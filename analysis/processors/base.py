@@ -93,14 +93,18 @@ class BaseProcessor(processor.ProcessorABC):
         hlt_paths = event_selection["hlt_paths"]
         histograms = deepcopy(self.histograms)
 
-        if self.workflow_config.corrections_config["objects"]:
-            if "jet_vetomaps" in self.workflow_config.corrections_config["objects"]:
-                events = apply_jetvetomaps(events, year)
+        # if self.workflow_config.corrections_config["objects"]:
+        #     if "jet_vetomaps" in self.workflow_config.corrections_config["objects"]:
+        #         events = apply_jetvetomaps(events, year)
 
         # check if dataset is MC or Data
         is_mc = hasattr(events, "genWeight")
         if not is_mc:
             events["Jet", "hadronFlavour"] = ak.zeros_like(events.Jet.pt)
+            
+        if self.workflow_config.corrections_config["objects"]:
+            if "jet_vetomaps" in self.workflow_config.corrections_config["objects"]:
+                events = apply_jetvetomaps(events, year)
 
         # initialize output dictionary
         output = {}

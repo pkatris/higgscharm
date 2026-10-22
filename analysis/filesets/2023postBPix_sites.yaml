@@ -1,6 +1,6 @@
 black:
 - T2_US_Caltech
-- T2_US_Florida
+- T2_US_Wisconsin
 white:
 - T1_DE_KIT_Disk
 - T1_ES_PIC_Disk
@@ -15,7 +15,6 @@ white:
 - T2_EE_Estonia
 - T2_ES_CIEMAT
 - T2_HU_Budapest
-- T2_IN_TIFR
 - T2_IT_Legnaro
 - T2_KR_KISTI
 - T2_PL_Cyfronet
@@ -23,20 +22,21 @@ white:
 - T2_PT_NCG_Lisbon
 - T2_RU_JINR
 - T2_UA_KIPT
-- T2_US_MIT
 - T2_US_Nebraska
 - T2_US_UCSD
 - T2_US_Vanderbilt
-- T2_US_Wisconsin
 - T3_CH_PSI
 - T3_US_FNALLPC
 - T2_BR_SPRACE
 - T3_US_NotreDame
 - T1_FR_CCIN2P3_Disk
-- T2_US_Purdue
 - T2_UK_London_IC
 - T2_DE_DESY
-- T2_BE_IIHE
 - T3_US_Rutgers
 - T2_DE_RWTH
+- T2_US_Florida
+- T2_IN_TIFR
+- T2_US_MIT
 - T2_TW_NCHC
+- T2_US_Purdue
+- T2_BE_IIHE

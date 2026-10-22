@@ -290,3 +290,16 @@ ZHto2Zto4L:
   process: H(125) 
   key: higgs
   xsec: 0.000775
+SomeSMSignal:
+  era: signal
+  query: 2022preEE_signal
+  key: smsignal
+  process: smsignal
+  xsec: 0.000026381
+# H+b background samples
+2022preEEHB:
+  era: signal
+  query: 2022preEEHB
+  key: hb
+  process: hb
+  xsec: 0.000173299

@@ -410,3 +410,16 @@ TTH_Hto2Z:
   process: H(125) 
   key: higgs
   xsec: 0.00312
+SomeSMSignal:
+  era: signal
+  query: 2022postEE_signal
+  key: smsignal
+  process: smsignal
+  xsec: 0.000026381
+# H+b background samples
+2022postEEHB:
+  era: signal
+  query: 2022postEEHB
+  key: hb
+  process: hb
+  xsec: 0.000173299

@@ -471,3 +471,16 @@ SMEFT_CuH22_HplusC_INT_2022preEE:
   key: smeft_cuh_int
   process: smeft_cuh_int
   xsec: 0.00002784
+SomeSMSignal:
+  era: signal
+  query: 2022preEE_signal
+  key: smsignal
+  process: smsignal
+  xsec: 0.000026381
+# H+b background samples
+2022preEEHB:
+  era: signal
+  query: 2022preEEHB
+  key: hb
+  process: hb
+  xsec: 0.000173299

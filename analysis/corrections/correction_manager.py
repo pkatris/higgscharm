@@ -15,6 +15,7 @@ from analysis.corrections.muon_ss import apply_muon_ss_corrections, apply_muon_s
 from analysis.corrections.partonshower import add_partonshower_weight
 from analysis.corrections.electron_ss import apply_electron_ss_corrections
 from analysis.corrections.higgs_hf import add_higgs_hf_weight
+from analysis.corrections.kfactors import add_kfactor_weights
 
 
 def object_corrector_manager(events, year, dataset, workflow_config):
@@ -180,6 +181,19 @@ def weight_manager(pruned_ev, year, dataset, workflow_config, variation="nominal
                         events=pruned_ev,
                         weights_container=weights_container,
                     )
+        if "kFactorWeight" in weights_config:
+            if weights_config["kFactorWeight"]:
+                # NNLO QCD k-factors for ggZZ (vs m4l) and NNLO QCD x NLO EW for
+                # qqZZ (vs m4l, |cos theta*|), from gen-level hard-process leptons.
+                # Only applied to datasets matching the ggzz/qqzz name prefixes
+                # (see kfactors.py); a no-op for everything else.
+                add_kfactor_weights(
+                    events=pruned_ev,
+                    weights_container=weights_container,
+                    year=year,
+                    dataset=dataset,
+                    config=weights_config["kFactorWeight"],
+                )
         if "higgsHFWeight" in weights_config:
             if weights_config["higgsHFWeight"]:
                 # ggH/VBF only (see higgs_hf.py); per-event, keyed on gen-jet heavy

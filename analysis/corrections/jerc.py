@@ -3,6 +3,7 @@
 # copied from https://github.com/green-cabbage/copperheadV2/blob/main/corrections/jet.py and https://github.com/cms-btv-pog/BTVNanoCommissioning/blob/master/src/BTVNanoCommissioning/utils/correction.py
 import copy
 import yaml
+import warnings
 import contextlib
 import correctionlib
 import numpy as np
@@ -236,6 +237,72 @@ def apply_jerc_coffea(
 # CORRECTIONLIB
 # ----------------------------------------------------------------------------------------------------
 
+# FIXED 2026-10-21: single source of truth for correctionlib JEC/JER tags, shared by the
+# nominal (apply_jerc_correctionlib) and shift (get_corrected_jets_with_shifts) paths.
+# Previously the nominal path hardcoded 2024 = Summer24Prompt24_V1 while the shift path read
+# jec_params_correctionlib.yaml (2024 = Summer24Prompt24_V2, not in the pinned 2024 JSON ->
+# KeyError 'Summer24Prompt24_V2_MC_L1L2L3Res_AK4PFPuppi'), and the shift path looked up the
+# data tag by era (params['C'] -> KeyError) although 2024 has a single "Data" tag. Entries
+# here take precedence over the yaml so nominal and shifted jets always use the same JEC.
+CORRECTIONLIB_TAG_OVERRIDES = {
+    "2024": {
+        # For the time being, use the Summer23BPix JERs for 2024 data (November 2025)
+        "MC": "Summer24Prompt24_V1 Summer23BPixPrompt23_RunD_JRV1",
+        "Data": "Summer24Prompt24_V1",
+    }
+}
+
+JEC_ALGO_CORRECTIONLIB = "AK4PFPuppi"
+
+
+def get_correctionlib_tags(year):
+    """{'MC': '<jec_tag> <jer_tag>', 'Data': '<jec_tag>' and/or '<era>': '<jec_tag>'}"""
+    if year in CORRECTIONLIB_TAG_OVERRIDES:
+        return CORRECTIONLIB_TAG_OVERRIDES[year]
+    return JEC_PARAMS_CORRECTIONLIB[year]
+
+
+def get_correctionlib_data_tag(params, dataset, year):
+    """Per-era data tag if the year defines one (2022/2023), else the single 'Data' tag (2024)."""
+    era = get_dataset_era(dataset, year)
+    tag = params.get(era, params.get("Data"))
+    if tag is None:
+        raise KeyError(
+            f"No JEC data tag for year '{year}', era '{era}' "
+            f"(available keys: {list(params)})"
+        )
+    return tag
+
+
+def check_correction_names(cset, names, year):
+    """Fail early with a readable message if a correction is missing from the JERC JSON."""
+    available = set(cset.keys()) | set(cset.compound.keys())
+    missing = [n for n in names if n not in available]
+    if missing:
+        tags = sorted(
+            {k.rsplit(f"_{JEC_ALGO_CORRECTIONLIB}", 1)[0].rsplit("_", 1)[0] for k in available}
+        )
+        raise KeyError(
+            f"JERC JSON for '{year}' ({correction_files['jerc'][year]}) has no {missing}. "
+            f"Tags present in the file: {tags}"
+        )
+
+
+def load_jersmear():
+    cset_jersmear_paths = [
+        "/cvmfs/cms-griddata.cern.ch/cat/metadata/JME/JER-Smearing/latest/jer_smear.json.gz",
+        "/cvmfs/cms-griddata.cern.ch/cat/metadata/JME/jer_smear.json.gz",
+    ]
+    for _jersmear_path in cset_jersmear_paths:
+        if Path(_jersmear_path).exists():
+            return correctionlib.CorrectionSet.from_file(_jersmear_path)["JERSmear"]
+    warnings.warn(
+        "JER smearing JSON not found in CVMFS. JER smearing corrections will be disabled.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return None
+
 
 # from https://gitlab.cern.ch/cms-nanoAOD/jsonpog-integration/-/blob/master/examples/jercExample.py
 def get_corr_inputs(input_dict, corr_obj, jersyst="nom"):
@@ -265,62 +332,30 @@ def get_corr_inputs(input_dict, corr_obj, jersyst="nom"):
 
 
 def apply_jerc_correctionlib(events, year, dataset):
-    jec_params = {
-        "2024": {
-            # For the time being, use the Summer23BPix JERs for 2024 data (November 2025)
-            "MC": "Summer24Prompt24_V1 Summer23BPixPrompt23_RunD_JRV1",
-            "Data": "Summer24Prompt24_V1",
-        }
-    }
-
-    cset_jersmear_paths = [
-        "/cvmfs/cms-griddata.cern.ch/cat/metadata/JME/JER-Smearing/latest/jer_smear.json.gz",
-        "/cvmfs/cms-griddata.cern.ch/cat/metadata/JME/jer_smear.json.gz",
-    ]
-    for _jersmear_path in cset_jersmear_paths:
-        if Path(_jersmear_path).exists:
-            cset_jersmear = correctionlib.CorrectionSet.from_file(_jersmear_path)
-            break
-    else:
-        warnings.warn(
-            "JER smearing JSON not found in CVMFS. JER smearing corrections will be disabled.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        cset_jersmear = {"JERSmear": None}
-    sf_jersmear = cset_jersmear["JERSmear"]
+    params = get_correctionlib_tags(year)
+    sf_jersmear = load_jersmear()
 
     cset = correctionlib.CorrectionSet.from_file(correction_files["jerc"][year])
 
-    for d in jec_params[year].keys():
-        if (
-            np.all(
-                np.char.find(
-                    np.array(list(cset.keys())),
-                    jec_params[year][d],
-                )
-            )
-            == -1
-        ):
-            raise (f"{d} has no JEC map : {jec_params[year][d]} available")
-
     is_mc = hasattr(events, "genWeight")
-    jecname = ""
-    # https://cms-jerc.web.cern.ch/JECUncertaintySources/, currently no recommendation of reduced/full split sources
-    syst_list = [
-        i.split("_")[3]
-        for i in cset.keys()
-        if "MC" in i
-        and "L1" not in i
-        and "L2" not in i
-        and "L3" not in i
-        and i.split("_")[3] != "MC"
-    ]
     if is_mc:
-        jecname = jec_params[year]["MC"].split(" ")[0] + "_MC"
-        jrname = jec_params[year]["MC"].split(" ")[1] + "_MC"
+        jecname, jrname = params["MC"].split(" ")
+        jecname += "_MC"
+        jrname += "_MC"
+        check_correction_names(
+            cset,
+            [
+                f"{jecname}_L1L2L3Res_{JEC_ALGO_CORRECTIONLIB}",
+                f"{jrname}_ScaleFactor_{JEC_ALGO_CORRECTIONLIB}",
+                f"{jrname}_PtResolution_{JEC_ALGO_CORRECTIONLIB}",
+            ],
+            year,
+        )
     else:
-        jecname = jec_params[year]["Data"] + "_DATA"
+        jecname = get_correctionlib_data_tag(params, dataset, year) + "_DATA"
+        check_correction_names(
+            cset, [f"{jecname}_L1L2L3Res_{JEC_ALGO_CORRECTIONLIB}"], year
+        )
 
     # store the original jet info
     nocorrjet = events.Jet
@@ -345,14 +380,14 @@ def apply_jerc_correctionlib(events, year, dataset):
     j, nj = ak.flatten(nocorrjet), ak.num(nocorrjet)
 
     # JEC
-    jec_corr = cset.compound[f"{jecname}_L1L2L3Res_AK4PFPuppi"]
+    jec_corr = cset.compound[f"{jecname}_L1L2L3Res_{JEC_ALGO_CORRECTIONLIB}"]
     jec_input = get_corr_inputs(j, jec_corr)
     jec_flat_corr_factor = jec_corr.evaluate(*jec_input)
 
     ## JER
     if is_mc:
-        jer_sf = cset[f"{jrname}_ScaleFactor_AK4PFPuppi"]
-        jer_ptres = cset[f"{jrname}_PtResolution_AK4PFPuppi"]
+        jer_sf = cset[f"{jrname}_ScaleFactor_{JEC_ALGO_CORRECTIONLIB}"]
+        jer_ptres = cset[f"{jrname}_PtResolution_{JEC_ALGO_CORRECTIONLIB}"]
         # for MC, correct the jet pT with JEC first
         j["pt"] = j["pt_raw"] * jec_flat_corr_factor
         j["mass"] = j["mass_raw"] * jec_flat_corr_factor
@@ -415,25 +450,29 @@ def get_corrected_jets_with_shifts(events, year):
     is_mc = hasattr(events, "genWeight")
     dataset = events.metadata["dataset"]
 
-    cset_jersmear_paths = [
-        "/cvmfs/cms-griddata.cern.ch/cat/metadata/JME/JER-Smearing/latest/jer_smear.json.gz",
-        "/cvmfs/cms-griddata.cern.ch/cat/metadata/JME/jer_smear.json.gz",
-    ]
-    sf_jersmear = None
-    for _jersmear_path in cset_jersmear_paths:
-        if Path(_jersmear_path).exists():
-            sf_jersmear = correctionlib.CorrectionSet.from_file(_jersmear_path)["JERSmear"]
-            break
+    sf_jersmear = load_jersmear()
 
     cset = correctionlib.CorrectionSet.from_file(correction_files["jerc"][year])
-    params = JEC_PARAMS_CORRECTIONLIB[year]
+    params = get_correctionlib_tags(year)
     if is_mc:
         jecname, jrname = params["MC"].split(" ")
         jecname += "_MC"
         jrname += "_MC"
+        check_correction_names(
+            cset,
+            [
+                f"{jecname}_L1L2L3Res_{JEC_ALGO_CORRECTIONLIB}",
+                f"{jecname}_Total_{JEC_ALGO_CORRECTIONLIB}",
+                f"{jrname}_ScaleFactor_{JEC_ALGO_CORRECTIONLIB}",
+                f"{jrname}_PtResolution_{JEC_ALGO_CORRECTIONLIB}",
+            ],
+            year,
+        )
     else:
-        era = get_dataset_era(dataset, year)
-        jecname = params[era] + "_DATA"
+        jecname = get_correctionlib_data_tag(params, dataset, year) + "_DATA"
+        check_correction_names(
+            cset, [f"{jecname}_L1L2L3Res_{JEC_ALGO_CORRECTIONLIB}"], year
+        )
 
     nocorrjet = events.Jet
     nocorrjet["pt_raw"] = (1 - nocorrjet["rawFactor"]) * nocorrjet["pt"]
@@ -458,12 +497,12 @@ def get_corrected_jets_with_shifts(events, year):
     jets = copy.deepcopy(nocorrjet)
     j, nj = ak.flatten(nocorrjet), ak.num(nocorrjet)
 
-    jec_corr = cset.compound[f"{jecname}_L1L2L3Res_AK4PFPuppi"]
+    jec_corr = cset.compound[f"{jecname}_L1L2L3Res_{JEC_ALGO_CORRECTIONLIB}"]
     jec_flat_corr_factor = jec_corr.evaluate(*get_corr_inputs(j, jec_corr))
 
     if is_mc:
-        jer_sf = cset[f"{jrname}_ScaleFactor_AK4PFPuppi"]
-        jer_ptres = cset[f"{jrname}_PtResolution_AK4PFPuppi"]
+        jer_sf = cset[f"{jrname}_ScaleFactor_{JEC_ALGO_CORRECTIONLIB}"]
+        jer_ptres = cset[f"{jrname}_PtResolution_{JEC_ALGO_CORRECTIONLIB}"]
         j["pt"] = j["pt_raw"] * jec_flat_corr_factor
         j["mass"] = j["mass_raw"] * jec_flat_corr_factor
         j["JER"] = jer_ptres.evaluate(*get_corr_inputs(j, jer_ptres))
@@ -491,7 +530,7 @@ def get_corrected_jets_with_shifts(events, year):
     )
 
     if is_mc:
-        jesuncmap = cset[f"{jecname}_Total_AK4PFPuppi"]
+        jesuncmap = cset[f"{jecname}_Total_{JEC_ALGO_CORRECTIONLIB}"]
         jesunc = ak.unflatten(jesuncmap.evaluate(j.eta, j.pt), nj)
         unc_jets, unc_met = {}, {}
         for var in ["up", "down"]:

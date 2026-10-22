@@ -1,0 +1,739 @@
+# H+c MVA workflow with 4-class classification -- ctag2d + JES/JER SHIFT VARIANT
+#
+# Byte-identical to hplusc_mva_4class_ctag2d.yaml except corrections.objects:
+# "jec" -> "jec_shifts". Created 2026-08-18 to produce the JES/JER shift
+# templates needed for the CMS_scale_j_<year>/CMS_res_j_<year> systematics
+# (Total JES + JER, 2 nuisances -- the simpler of two schemes considered; the
+# alternative, an 11-source Regrouped JES split matching Felix Heyen's thesis,
+# needs a Regrouped JEC file this repo doesn't have, deferred).
+#
+# "jec_shifts" makes object_corrector_manager (analysis/corrections/
+# correction_manager.py) return a list of (Jet/MET collections, shift_name)
+# tuples instead of applying nominal-only corrections in place; base.py's
+# process() then reruns the FULL selection/weight/output block once per shift,
+# writing each non-nominal shift's parquet output to its own
+# <workflow>/<year>/<dataset>/<category>/<shift_name>/ subdirectory ("shift
+# directories"). Nominal output is unaffected -- same location/columns as the
+# plain hplusc_mva_4class_ctag2d.yaml workflow. See analysis/corrections/jerc.py
+# (apply_jerc_shifts, added 2026-08-18) and second-brain
+# Tasks/HcZZ-fake-rate.md for the full writeup.
+#
+# IMPORTANT: every jet-dependent MVA feature changes under these shifts, so
+# each shift's output needs its OWN MVA inference pass afterward -- do not
+# reuse nominal scores against shifted kinematics.
+#
+# --- Original ctag2d-variant header, still accurate for everything else below ---
+# Byte-identical to hplusc_mva_4class.yaml except event_weights: swaps the 1D
+# fixed-WP CTagCorrector (`ctagging: [wp: loose]`) for the 2D pseudo-continuous
+# CTag2DCorrector (`ctagging_2d: true`). Created 2026-08-14 to compare yields
+# side-by-side before deciding whether ctag2d replaces the production 1D
+# corrector outright. See README_HcZZ.md "Open items" and second-brain memory
+# hczz_pnet_ctag_sf_migration. The `cjets` OBJECT SELECTION cut (event-level
+# `atleast_one_cjet`, still `working_points.jet_ctagging(events, 'loose', year)`
+# below) is UNCHANGED -- only the SF weighting scheme differs between this file
+# and production. Do not promote to production by renaming; keep both while
+# comparing.
+#
+# This workflow extends hplusc to output all features needed for MVA training
+# and inference. MVA inference is performed in post-processing using b-hive.
+#
+# 4-class MVA classification:
+#   Class 0: qqZZ       - qq→ZZ continuum background
+#   Class 1: ggZZ       - gg→ZZ continuum background
+#   Class 2: Signal     - H+c signal (target)
+#   Class 3: Other_Higgs - Combined: HPlusB + ggH + Other backgrounds
+#
+# b-hive configuration paths (set via environment or command line):
+#   --bhive-config /eos/user/s/snandaku/b-hive_ttcc/config/<4class_config>.yml
+#   --bhive-model /eos/user/s/snandaku/b-hive_ttcc/output/.../best_model.pt
+#
+# Usage:
+#   python runner.py -w hplusc_mva_4class_ctag2d -y 2022postEE -o parquet
+#   python run_postprocess.py -w hplusc_mva_4class_ctag2d -y 2022postEE --mva-inference
+#
+# Class mapping from 5-class to 4-class:
+#   qqgg_toZZ -> split into qqZZ (0) and ggZZ (1)
+#   Signal    -> Signal (2)
+#   HPlusB    -> Other_Higgs (3)
+#   ggH       -> Other_Higgs (3)
+#   Other     -> Other_Higgs (3)
+
+datasets:
+  data:
+    - muon
+    - double_muon
+    - electron
+    - double_electron
+    - muon_electron
+  mc:
+    - higgs
+    - hb
+    - qqtozz
+    - ggtozz
+    - dy_nlo
+  signal:
+    - smsignal
+
+object_selection:
+  muons:
+    field: events.Muon
+    add_cut:
+      is_loose:
+        - events.Muon.pt > 5
+        - np.abs(events.Muon.eta) < 2.4
+        - np.abs(events.Muon.dxy) < 0.5
+        - np.abs(events.Muon.dz) < 1
+        - events.Muon.isGlobal | events.Muon.isTracker
+      is_relaxed:
+        - objects['muons'].is_loose
+        - np.abs(events.Muon.sip3d) < 4
+      is_tight:
+        - objects['muons'].is_loose
+        - objects['muons'].is_relaxed
+        - events.Muon.isPFcand | ((events.Muon.highPtId > 0) & (events.Muon.pt > 200))
+  electrons:
+    field: events.Electron
+    add_cut:
+      is_loose:
+        - events.Electron.pt > 7
+        - np.abs(events.Electron.eta) < 2.5
+        - np.abs(events.Electron.dxy) < 0.5
+        - np.abs(events.Electron.dz) < 1
+      is_relaxed:
+        - objects['electrons'].is_loose
+        - np.abs(events.Electron.sip3d) < 4
+      is_tight:
+        - objects['electrons'].is_loose
+        - objects['electrons'].is_relaxed
+        - working_points.electron_id(events, 'bdt')
+    cuts:
+      - delta_r_higher(events.Electron, objects['muons'], 0.05)
+  fsr_photons:
+    field: events.FsrPhoton
+    cuts:
+      - events.FsrPhoton.pt > 2
+      - np.abs(events.FsrPhoton.eta) < 2.4
+      - events.FsrPhoton.relIso03 < 1.8
+  leptons:
+    field: select_zzto4l_leptons
+  zcandidates:
+    field: select_zcandidates
+    add_cut:
+      is_ossf:
+        - objects['zcandidates'].l1.pdgId == -objects['zcandidates'].l2.pdgId
+      is_sr:
+        - objects['zcandidates'].is_ossf
+        - objects['zcandidates'].l1.is_tight & objects['zcandidates'].l2.is_tight
+    cuts:
+      - (objects['zcandidates'].p4.mass > 12) & (objects['zcandidates'].p4.mass < 120)
+  zzcandidates:
+    field: select_zzcandidates
+    cuts:
+      - objects['zzcandidates'].z1.is_sr & objects['zzcandidates'].z2.is_sr
+      - (objects['zzcandidates'].z1.p4 + objects['zzcandidates'].z2.p4).mass > 70
+  best_zzcandidate:
+    field: select_best_zzcandidate
+  zz_mass_4mu:
+    field: select_mass_4mu_sr
+  zz_mass_4e:
+    field: select_mass_4e_sr
+  zz_mass_2mu2e:
+    field: select_mass_2mu2e_sr
+  zz_mass_2e2mu:
+    field: select_mass_2e2mu_sr
+  jets:
+    field: events.Jet
+    cuts:
+      - events.Jet.pt > 20
+      - np.abs(events.Jet.eta) < 2.5
+      - working_points.jet_id(events, year, 'tightlepveto')
+      - delta_r_higher(events.Jet, objects['leptons'], 0.4)
+  cjets:
+    field: events.Jet
+    cuts:
+      - events.Jet.pt > 20
+      - np.abs(events.Jet.eta) < 2.5
+      - working_points.jet_id(events, year, 'tightlepveto')
+      - delta_r_higher(events.Jet, objects['leptons'], 0.4)
+      - working_points.jet_ctagging(events, 'loose', year)
+  zzcandidate_cjet_dphi_inclusive:
+    field: select_dphi_inclusive
+  zzcandidate_cjet_dphi_4e:
+    field: select_dphi_4e
+  zzcandidate_cjet_dphi_4mu:
+    field: select_dphi_4mu
+  zzcandidate_cjet_dphi_2mu2e:
+    field: select_dphi_2mu2e
+  zzcandidate_cjet_dphi_2e2mu:
+    field: select_dphi_2e2mu
+
+event_selection:
+  hlt_paths:
+    - SingleMu
+    - DiMu
+    - TriMu
+    - SingleEle
+    - DiEle
+    - MuEle
+  selections:
+    trigger: get_zzto4l_trigger_mask(events, hlt_paths, dataset, year)
+    lumimask: get_lumi_mask(events, year)
+    atleast_one_goodvertex: events.PV.npvsGood > 0
+    atleast_one_zz: ak.num(objects['zzcandidates']) >= 1
+    atleast_one_cjet: ak.num(objects['cjets']) >= 1
+  categories:
+    base:
+      - trigger
+      - lumimask
+      - atleast_one_goodvertex
+      - atleast_one_zz
+      - atleast_one_cjet
+
+corrections:
+  objects:
+    - jec_shifts
+    - jet_vetomaps
+    - muon_ss
+    - electon_ss
+  event_weights:
+    genWeight: true
+    pileupWeight: true
+    partonshowerWeight: true
+    lhepdfWeight: true
+    lhescaleWeight: true
+    nnlopsWeight: true
+    higgsHFWeight: true
+    electron:
+      - id: false
+      - reco: true
+      - trigger: false
+    ctagging_2d: true
+
+# MVA configuration for post-processing (4-class)
+# Pass these paths via command line:
+#   --bhive-config /eos/user/s/snandaku/b-hive_ttcc/config/<4class_config>.yml
+#   --bhive-model /eos/user/s/snandaku/b-hive_ttcc/output/.../best_model.pt
+#
+# 4-class labels: ['qqZZ', 'ggZZ', 'Signal', 'Other_Higgs']
+#   - qqZZ: qq→ZZ continuum
+#   - ggZZ: gg→ZZ continuum
+#   - Signal: H+c signal
+#   - Other_Higgs: HPlusB + ggH + Other (combined)
+histogram_config:
+  add_syst_axis: true
+  add_weight: true
+  axes:
+    # =========================================================================
+    # Standard ZZ observables
+    # =========================================================================
+    zz_mass_inclusive:
+      type: Regular
+      bins: 66
+      start: 70
+      stop: 400
+      label: $m_{4\ell}$ [GeV]
+      expression: (objects['best_zzcandidate'].z1.p4 + objects['best_zzcandidate'].z2.p4).mass
+    zz_pt_inclusive:
+      type: Regular
+      bins: 40
+      start: 0
+      stop: 400
+      label: $p_T(4\ell)$ [GeV]
+      expression: objects['best_zzcandidate'].p4.pt
+    zz_eta_inclusive:
+      type: Regular
+      bins: 50
+      start: -5
+      stop: 5
+      label: $\eta(4\ell)$
+      expression: (objects['best_zzcandidate'].z1.p4 + objects['best_zzcandidate'].z2.p4).eta
+    zz_phi_inclusive:
+      type: Regular
+      bins: 50
+      start: -3.14159
+      stop: 3.14159
+      label: $\phi(4\ell)$
+      expression: (objects['best_zzcandidate'].z1.p4 + objects['best_zzcandidate'].z2.p4).phi
+    m4l:
+      type: Regular
+      bins: 66
+      start: 70
+      stop: 400
+      label: $m_{4\ell}$ [GeV]
+      expression: (objects['best_zzcandidate'].z1.p4 + objects['best_zzcandidate'].z2.p4).mass
+    eta_4l:
+      type: Regular
+      bins: 50
+      start: -5
+      stop: 5
+      label: $\eta(4\ell)$
+      expression: (objects['best_zzcandidate'].z1.p4 + objects['best_zzcandidate'].z2.p4).eta
+    pT_4l:
+      type: Regular
+      bins: 40
+      start: 0
+      stop: 400
+      label: $p_T(4\ell)$ [GeV]
+      expression: (objects['best_zzcandidate'].z1.p4 + objects['best_zzcandidate'].z2.p4).pt
+    phi_4l:
+      type: Regular
+      bins: 50
+      start: -3.14159
+      stop: 3.14159
+      label: $\phi(4\ell)$
+      expression: (objects['best_zzcandidate'].z1.p4 + objects['best_zzcandidate'].z2.p4).phi
+    zz_mass_4mu:
+      type: Regular
+      bins: 66
+      start: 70
+      stop: 400
+      label: $m_{4\mu}$ [GeV]
+      expression: objects['zz_mass_4mu']
+    zz_mass_4e:
+      type: Regular
+      bins: 66
+      start: 70
+      stop: 400
+      label: $m_{4e}$ [GeV]
+      expression: objects['zz_mass_4e']
+    zz_mass_2mu2e:
+      type: Regular
+      bins: 66
+      start: 70
+      stop: 400
+      label: $m_{2\mu 2e}$ [GeV]
+      expression: objects['zz_mass_2mu2e']
+    zz_mass_2e2mu:
+      type: Regular
+      bins: 66
+      start: 70
+      stop: 400
+      label: $m_{2e2\mu}$ [GeV]
+      expression: objects['zz_mass_2e2mu']
+
+    # =========================================================================
+    # Z boson kinematics (for MVA)
+    # =========================================================================
+    z1_pt:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 500
+      label: $p_T(Z_1)$ [GeV]
+      expression: objects['best_zzcandidate'].z1.p4.pt
+    z1_eta:
+      type: Regular
+      bins: 50
+      start: -5
+      stop: 5
+      label: $\eta(Z_1)$
+      expression: objects['best_zzcandidate'].z1.p4.eta
+    z1_phi:
+      type: Regular
+      bins: 50
+      start: -3.14159
+      stop: 3.14159
+      label: $\phi(Z_1)$
+      expression: objects['best_zzcandidate'].z1.p4.phi
+    z1_mass:
+      type: Regular
+      bins: 54
+      start: 12
+      stop: 120
+      label: $m(Z_1)$ [GeV]
+      expression: objects['best_zzcandidate'].z1.p4.mass
+    z2_pt:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 500
+      label: $p_T(Z_2)$ [GeV]
+      expression: objects['best_zzcandidate'].z2.p4.pt
+    z2_eta:
+      type: Regular
+      bins: 50
+      start: -5
+      stop: 5
+      label: $\eta(Z_2)$
+      expression: objects['best_zzcandidate'].z2.p4.eta
+    z2_phi:
+      type: Regular
+      bins: 50
+      start: -3.14159
+      stop: 3.14159
+      label: $\phi(Z_2)$
+      expression: objects['best_zzcandidate'].z2.p4.phi
+    z2_mass:
+      type: Regular
+      bins: 54
+      start: 12
+      stop: 120
+      label: $m(Z_2)$ [GeV]
+      expression: objects['best_zzcandidate'].z2.p4.mass
+    deltaR_ZZ:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 6
+      label: $\Delta R(Z_1, Z_2)$
+      expression: objects['best_zzcandidate'].z1.p4.delta_r(objects['best_zzcandidate'].z2.p4)
+
+    # =========================================================================
+    # Jet observables (for MVA)
+    # =========================================================================
+    jet_multiplicity:
+      type: Integer
+      start: 0
+      stop: 14
+      label: Jet Multiplicity
+      expression: ak.num(objects['jets'])
+    jet_ht:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 1000
+      label: $H_T$ (Jets) [GeV]
+      expression: ak.sum(objects['jets'].pt, axis=1)
+    jet_pt:
+      type: Regular
+      bins: 50
+      start: 20
+      stop: 500
+      label: Jets $p_T$ [GeV]
+      expression: objects['jets'].pt
+    jet_eta:
+      type: Regular
+      bins: 50
+      start: -2.5
+      stop: 2.5
+      label: Jets $\eta$
+      expression: objects['jets'].eta
+    jet_phi:
+      type: Regular
+      bins: 50
+      start: -3.14159
+      stop: 3.14159
+      label: Jets $\phi$
+      expression: objects['jets'].phi
+    jet_mass:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 100
+      label: Jets mass [GeV]
+      expression: objects['jets'].mass
+    # =========================================================================
+    # Jet b-tagging scores (for MVA - PNet and ParT)
+    # =========================================================================
+    jet_btagPNetB:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 1
+      label: Jets PNet B
+      expression: objects['jets'].btagPNetB
+    jet_btagPNetCvL:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 1
+      label: Jets PNet CvL
+      expression: objects['jets'].btagPNetCvL
+    jet_btagPNetCvB:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 1
+      label: Jets PNet CvB
+      expression: objects['jets'].btagPNetCvB
+    jet_btagPNetQvG:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 1
+      label: Jets PNet QvG
+      expression: objects['jets'].btagPNetQvG
+    jet_btagUParTAK4B:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 1
+      label: Jets ParT B
+      expression: objects['jets'].btagUParTAK4B
+    jet_btagUParTAK4CvB:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 1
+      label: Jets ParT CvB
+      expression: objects['jets'].btagUParTAK4CvB
+    jet_btagUParTAK4CvL:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 1
+      label: Jets ParT CvL
+      expression: objects['jets'].btagUParTAK4CvL
+    jet_hadronFlavour:
+      type: IntCategory
+      categories:
+        - 0
+        - 4
+        - 5
+      label: Jets HadronFlavour
+      expression: objects['jets'].hadronFlavour
+
+    # =========================================================================
+    # c-jet observables
+    # =========================================================================
+    n_cjet:
+      type: Integer
+      start: 0
+      stop: 14
+      label: c-Jet Multiplicity
+      expression: ak.num(objects['cjets'])
+    cjets_multiplicity:
+      type: Integer
+      start: 0
+      stop: 14
+      label: c-Jet Multiplicity
+      expression: ak.num(objects['cjets'])
+    cjet_HT:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 1000
+      label: $H_T$ (c-Jets) [GeV]
+      expression: ak.sum(objects['cjets'].pt, axis=1)
+    cjets_pt:
+      type: Regular
+      bins: 50
+      start: 20
+      stop: 500
+      label: c-Jet $p_T$ [GeV]
+      expression: objects['cjets'].pt
+    cjets_eta:
+      type: Regular
+      bins: 50
+      start: -2.5
+      stop: 2.5
+      label: c-Jet $\eta$
+      expression: objects['cjets'].eta
+    cjets_phi:
+      type: Regular
+      bins: 50
+      start: -3.14159
+      stop: 3.14159
+      label: c-Jet $\phi$
+      expression: objects['cjets'].phi
+    cjets_mass:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 100
+      label: c-Jet mass [GeV]
+      expression: objects['cjets'].mass
+    cjets_btagUParTB:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 1
+      label: c-Jets UParT B
+      expression: objects['cjets'].btagUParTAK4B
+    cjets_btagUParTCvL:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 1
+      label: c-Jets UParT CvL
+      expression: objects['cjets'].btagUParTAK4CvL
+    cjets_btagUParTCvB:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 1
+      label: c-Jets UParT CvB
+      expression: objects['cjets'].btagUParTAK4CvB
+    cjets_hadronFlavour:
+      type: IntCategory
+      categories:
+        - 0
+        - 4
+        - 5
+      label: c-Jets HadronFlavour
+      expression: objects['cjets'].hadronFlavour
+    cjets_h_dphi_inclusive:
+      type: Regular
+      bins: 50
+      start: 0
+      stop: 3.14159
+      label: $|\Delta\phi(c\,\mathrm{jet}, H_{4\ell})|$
+      expression: np.abs(objects['zzcandidate_cjet_dphi_inclusive'])
+
+    # =========================================================================
+    # Secondary Vertex observables
+    # =========================================================================
+    nSV:
+      type: Integer
+      start: 0
+      stop: 10
+      label: Number of Secondary Vertices
+      expression: ak.num(events.SV)
+
+    # =========================================================================
+    # Lepton kinematics (Z1 leptons)
+    # =========================================================================
+    z1_l1_pt:
+      type: Regular
+      bins: 50
+      start: 5
+      stop: 300
+      label: $p_T(\ell_1^{Z_1})$ [GeV]
+      expression: objects['best_zzcandidate'].z1.l1.pt
+    z1_l1_eta:
+      type: Regular
+      bins: 50
+      start: -2.5
+      stop: 2.5
+      label: $\eta(\ell_1^{Z_1})$
+      expression: objects['best_zzcandidate'].z1.l1.eta
+    z1_l1_phi:
+      type: Regular
+      bins: 50
+      start: -3.14159
+      stop: 3.14159
+      label: $\phi(\ell_1^{Z_1})$
+      expression: objects['best_zzcandidate'].z1.l1.phi
+    z1_l2_pt:
+      type: Regular
+      bins: 50
+      start: 5
+      stop: 300
+      label: $p_T(\ell_2^{Z_1})$ [GeV]
+      expression: objects['best_zzcandidate'].z1.l2.pt
+    z1_l2_eta:
+      type: Regular
+      bins: 50
+      start: -2.5
+      stop: 2.5
+      label: $\eta(\ell_2^{Z_1})$
+      expression: objects['best_zzcandidate'].z1.l2.eta
+    z1_l2_phi:
+      type: Regular
+      bins: 50
+      start: -3.14159
+      stop: 3.14159
+      label: $\phi(\ell_2^{Z_1})$
+      expression: objects['best_zzcandidate'].z1.l2.phi
+
+    # =========================================================================
+    # Lepton kinematics (Z2 leptons)
+    # =========================================================================
+    z2_l1_pt:
+      type: Regular
+      bins: 50
+      start: 5
+      stop: 300
+      label: $p_T(\ell_1^{Z_2})$ [GeV]
+      expression: objects['best_zzcandidate'].z2.l1.pt
+    z2_l1_eta:
+      type: Regular
+      bins: 50
+      start: -2.5
+      stop: 2.5
+      label: $\eta(\ell_1^{Z_2})$
+      expression: objects['best_zzcandidate'].z2.l1.eta
+    z2_l1_phi:
+      type: Regular
+      bins: 50
+      start: -3.14159
+      stop: 3.14159
+      label: $\phi(\ell_1^{Z_2})$
+      expression: objects['best_zzcandidate'].z2.l1.phi
+    z2_l2_pt:
+      type: Regular
+      bins: 50
+      start: 5
+      stop: 300
+      label: $p_T(\ell_2^{Z_2})$ [GeV]
+      expression: objects['best_zzcandidate'].z2.l2.pt
+    z2_l2_eta:
+      type: Regular
+      bins: 50
+      start: -2.5
+      stop: 2.5
+      label: $\eta(\ell_2^{Z_2})$
+      expression: objects['best_zzcandidate'].z2.l2.eta
+    z2_l2_phi:
+      type: Regular
+      bins: 50
+      start: -3.14159
+      stop: 3.14159
+      label: $\phi(\ell_2^{Z_2})$
+      expression: objects['best_zzcandidate'].z2.l2.phi
+    is_qqZZ:
+      type: Integer
+      start: 0
+      stop: 2
+      label: is_qqZZ
+      expression: ak.ones_like(objects['best_zzcandidate'].p4.pt) * (1.0 if ('ZZto4L' in dataset and 'GluGluHtoZZ' not in dataset and 'GluGluToContinto2Z' not in dataset and 'GluGlutoContinto2Z' not in dataset and not ('SomeSMSignal' in dataset or 'HPlusCharm' in dataset) and not ('HPlusBottom' in dataset or 'HB_' in dataset or dataset.endswith('HB')) and not ('VBFHto' in dataset or 'ZHto' in dataset or 'WminusH' in dataset or 'WplusH' in dataset or 'TTH_' in dataset or 'bbH_' in dataset)) else 0.0)
+    is_ggZZ:
+      type: Integer
+      start: 0
+      stop: 2
+      label: is_ggZZ
+      expression: ak.ones_like(objects['best_zzcandidate'].p4.pt) * (1.0 if (('GluGluToContinto2Z' in dataset or 'GluGlutoContinto2Z' in dataset) and 'GluGluHtoZZ' not in dataset and not ('SomeSMSignal' in dataset or 'HPlusCharm' in dataset) and not ('HPlusBottom' in dataset or 'HB_' in dataset or dataset.endswith('HB')) and not ('VBFHto' in dataset or 'ZHto' in dataset or 'WminusH' in dataset or 'WplusH' in dataset or 'TTH_' in dataset or 'bbH_' in dataset)) else 0.0)
+    is_Signal:
+      type: Integer
+      start: 0
+      stop: 2
+      label: is_Signal
+      expression: ak.ones_like(objects['best_zzcandidate'].p4.pt) * (1.0 if (('SomeSMSignal' in dataset or 'HPlusCharm' in dataset) and not ('HPlusBottom' in dataset or 'HB_' in dataset or dataset.endswith('HB'))) else 0.0)
+    is_Other_Higgs:
+      type: Integer
+      start: 0
+      stop: 2
+      label: is_Other_Higgs
+      expression: ak.ones_like(objects['best_zzcandidate'].p4.pt) * (1.0 if (('HPlusBottom' in dataset or 'HB_' in dataset or dataset.endswith('HB') or 'GluGluHtoZZ' in dataset or 'VBFHto' in dataset or 'ZHto' in dataset or 'WminusH' in dataset or 'WplusH' in dataset or 'TTH_' in dataset or 'bbH_' in dataset) and not ('SomeSMSignal' in dataset or 'HPlusCharm' in dataset) and 'GluGluToContinto2Z' not in dataset and 'GluGlutoContinto2Z' not in dataset and not ('ZZto4L' in dataset and 'GluGluHtoZZ' not in dataset)) else 0.0)
+
+  # FIXED 2026-10-21: one axis per histogram. The previous layout grouped several
+  # fine-binned axes into single multi-dimensional histograms (e.g. `cjet` = 7 axes x 50
+  # bins ~ 7.8e11 bins, `z_kinematics` ~ 1.8e10, `zz_inclusive`/`leptons` ~ 6e6 each),
+  # multiplied by the syst axis and Weight storage -> GBs per job and held condor jobs.
+  # Same axes as before, now filled as independent 1D histograms (a few KB each).
+  # Re-add a multi-dim entry only where correlations are needed, with coarse binning.
+  layout:
+    zz_mass_inclusive: [zz_mass_inclusive]
+    zz_pt_inclusive: [zz_pt_inclusive]
+    zz_eta_inclusive: [zz_eta_inclusive]
+    deltaR_ZZ: [deltaR_ZZ]
+    z1_pt: [z1_pt]
+    z1_eta: [z1_eta]
+    z1_mass: [z1_mass]
+    z2_pt: [z2_pt]
+    z2_eta: [z2_eta]
+    z2_mass: [z2_mass]
+    zz_mass_4e: [zz_mass_4e]
+    zz_mass_4mu: [zz_mass_4mu]
+    zz_mass_2e2mu: [zz_mass_2e2mu]
+    zz_mass_2mu2e: [zz_mass_2mu2e]
+    jet_multiplicity: [jet_multiplicity]
+    jet_ht: [jet_ht]
+    nSV: [nSV]
+    jet_pt: [jet_pt]
+    jet_eta: [jet_eta]
+    jet_phi: [jet_phi]
+    jet_btagUParTAK4B: [jet_btagUParTAK4B]
+    jet_btagUParTAK4CvB: [jet_btagUParTAK4CvB]
+    jet_btagUParTAK4CvL: [jet_btagUParTAK4CvL]
+    cjets_pt: [cjets_pt]
+    cjets_eta: [cjets_eta]
+    cjets_phi: [cjets_phi]
+    cjets_h_dphi_inclusive: [cjets_h_dphi_inclusive]
+    cjets_btagUParTB: [cjets_btagUParTB]
+    cjets_btagUParTCvB: [cjets_btagUParTCvB]
+    cjets_btagUParTCvL: [cjets_btagUParTCvL]
+    z1_l1_pt: [z1_l1_pt]
+    z1_l2_pt: [z1_l2_pt]
+    z2_l1_pt: [z2_l1_pt]
+    z2_l2_pt: [z2_l2_pt]

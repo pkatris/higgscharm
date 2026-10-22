@@ -5,7 +5,6 @@ import glob
 import logging
 import argparse
 import subprocess
-import numpy as np
 import pandas as pd
 from pathlib import Path
 from collections import defaultdict
@@ -30,10 +29,9 @@ from analysis.postprocess.utils import (
     load_processed_histograms,
     get_results_report,
 )
-from analysis.postprocess.mva_inference import MVAPostProcessor
 
 
-OUTPUT_DIR = Path.cwd() / "outputs"
+OUTPUT_DIR = Path("/eos/user/p/pkatris/higgscharm/outputs")
 
 
 def parse_arguments():
@@ -117,34 +115,54 @@ def parse_arguments():
     )
     parser.add_argument("--blind", action="store_true", help="Blind data")
     parser.add_argument(
-        "--mva-inference",
-        action="store_true",
-        help="Run MVA inference on merged parquet files",
-    )
-    parser.add_argument(
-        "--mva-config",
-        type=str,
+        "--blind_range",
+        type=float,
+        nargs=2,
         default=None,
-        help="Path to b-hive config YAML for MVA inference",
+        metavar=("LOW", "HIGH"),
+        help="Blind data in [LOW, HIGH] of the variables in --blind_vars (e.g. 100 150)",
     )
     parser.add_argument(
-        "--mva-model",
+        "--blind_vars",
         type=str,
+        nargs="+",
         default=None,
-        help="Path to trained model .pt file for MVA inference",
+        help="Variables to apply --blind_range to (default: all plotted variables)",
     )
     parser.add_argument(
-        "--mva-output",
+        "--rebin",
         type=str,
+        nargs="+",
         default=None,
-        help="Output directory for MVA-scored parquets (default: outputs/<workflow>_mvascores/<year>)",
-    )
-    parser.add_argument(
-        "--mva-mass-window",
-        action="store_true",
-        help="Apply mass window cut (100 < m4l < 150 GeV) before running MVA inference",
+        metavar="VAR=SPEC",
+        help=(
+            "Rebin at plotting time. SPEC is an integer factor (e.g. zz_mass_inclusive=3 "
+            "turns 5 GeV into 15 GeV bins) or comma-separated new edges that are a subset "
+            "of the original ones (e.g. zz_mass_inclusive=70,80,85,90,95,100,105,...,400). "
+            "Use 'zz_mass_*=3' to apply to every variable matching the pattern."
+        ),
     )
     return parser.parse_args()
+
+
+def parse_rebin(rebin_args, variables):
+    """['var=3', 'zz_mass_*=70,80,...'] -> {variable: 3 or [edges]}"""
+    import fnmatch
+
+    rebin = {}
+    for item in rebin_args or []:
+        if "=" not in item:
+            raise ValueError(f"--rebin expects VAR=SPEC, got '{item}'")
+        pattern, spec = item.split("=", 1)
+        value = (
+            [float(x) for x in spec.split(",") if x.strip()] if "," in spec else int(spec)
+        )
+        matched = [v for v in variables if fnmatch.fnmatch(v, pattern)]
+        if not matched:
+            raise ValueError(f"--rebin: no histogram variable matches '{pattern}'")
+        for v in matched:
+            rebin[v] = value
+    return rebin
 
 
 def check_output_dir(workflow: str, year: str) -> Path:
@@ -222,6 +240,15 @@ def plot_variable(variable: str, group_by, histogram_config) -> bool:
     return False
 
 
+def get_blind_range(variable: str, blind_range, blind_vars):
+    """return the blinding window for this variable, or None if it isn't blinded"""
+    if blind_range is None:
+        return None
+    if blind_vars is None or variable in blind_vars:
+        return tuple(blind_range)
+    return None
+
+
 if __name__ == "__main__":
     args = parse_arguments()
 
@@ -243,6 +270,13 @@ if __name__ == "__main__":
 
     if "data" not in workflow_config.datasets:
         args.blind = True
+
+    if args.blind_range is not None:
+        low, high = args.blind_range
+        if low >= high:
+            raise ValueError(
+                f"--blind_range LOW must be smaller than HIGH (got {low}, {high})"
+            )
 
     if args.postprocess and (args.year not in ["2016", "2022", "2023"]):
         print_header(f"Running postprocess for {args.year}")
@@ -463,173 +497,6 @@ if __name__ == "__main__":
                     )
                     cutflow_eff.to_csv(category_dir / f"cutflow_eff_{category}.csv")
 
-    if args.mva_inference:
-        if not args.mva_config or not args.mva_model:
-            raise ValueError(
-                "--mva-config and --mva-model are required when using --mva-inference"
-            )
-        print_header(f"Running MVA inference for {args.year}")
-        logging.info(f"Config: {args.mva_config}")
-        logging.info(f"Model:  {args.mva_model}")
-
-        # Resolve output dir: default to outputs/<workflow>_mvascores/<year>
-        if args.mva_output:
-            mva_output_dir = Path(args.mva_output)
-        else:
-            mva_output_dir = OUTPUT_DIR / f"{args.workflow}_mvascores" / args.year
-        mva_output_dir.mkdir(parents=True, exist_ok=True)
-        logging.info(f"MVA output: {mva_output_dir}")
-
-        processor = MVAPostProcessor(
-            bhive_config_path=args.mva_config,
-            bhive_model_path=args.mva_model,
-            apply_mass_window=args.mva_mass_window,
-            era=args.year,
-        )
-        processor._load_model()
-
-        import hist as hist_lib
-
-        # Added 2026-08-14: histogram every MVA input feature (global + jagged
-        # candidate features), not just the score outputs -- for post-scoring
-        # data/MC-style validation plots of exactly what the model saw.
-        # Range heuristics are name-pattern-based since features span very different
-        # scales (pt in [0,300], eta in [-6,6], flags in {0,1}, ...); anything outside
-        # its assigned range lands in flow (over/underflow), it is not silently dropped.
-        def _feature_axis(col):
-            name = col.lower()
-            if name.startswith("jet_is_") or name.startswith("lepton_is_") or "_flag" in name \
-                    or name in ("in_mass_window", "lepton_isPFcand".lower()):
-                return hist_lib.axis.Regular(2, -0.5, 1.5, name=col, label=col, flow=True)
-            if "eta" in name:
-                return hist_lib.axis.Regular(50, -6, 6, name=col, label=col, flow=True)
-            if "phi" in name:
-                return hist_lib.axis.Regular(50, -3.2, 3.2, name=col, label=col, flow=True)
-            if name in ("m4l",) or name.endswith("_mass") or name == "mass":
-                return hist_lib.axis.Regular(50, 60, 200, name=col, label=col, flow=True)
-            if "deltar" in name or "dphi" in name:
-                return hist_lib.axis.Regular(50, 0, 6, name=col, label=col, flow=True)
-            if name in ("n_cjet", "nsv", "jet_multiplicity", "n_lepton") or "multiplicity" in name:
-                return hist_lib.axis.Regular(15, 0, 15, name=col, label=col, flow=True)
-            if "charge" in name:
-                return hist_lib.axis.Regular(5, -2.5, 2.5, name=col, label=col, flow=True)
-            if "iso" in name or "sip3d" in name or "mva" in name:
-                return hist_lib.axis.Regular(50, 0, 5, name=col, label=col, flow=True)
-            if "pt" in name or "ht" in name:
-                return hist_lib.axis.Regular(50, 0, 300, name=col, label=col, flow=True)
-            # generic fallback for anything unrecognized (still gets a histogram, just a
-            # wide default range with flow catching outliers)
-            return hist_lib.axis.Regular(50, -10, 10, name=col, label=col, flow=True)
-
-        def _build_mva_histograms(class_names, processor):
-            """Build one histogram per MVA score column (signal + per-class) PLUS one
-            per MVA input feature: global_features/lt_candidates (scalar, one value per
-            event) and cpf_candidates/vtx_features/npf_candidates (jagged -- one value
-            per jet/Z/lepton, flattened across candidates at fill time)."""
-            hists = {}
-            score_cols = ["mva_signal_score"] + [f"mva_score_{c}" for c in class_names]
-            scalar_cols = list(dict.fromkeys(
-                score_cols
-                + processor.config.get("global_features", [])
-                + processor.config.get("lt_candidates", [])
-            ))
-            jagged_cols = list(dict.fromkeys(
-                processor.config.get("cpf_candidates", [])
-                + processor.config.get("vtx_features", [])
-                + processor.config.get("npf_candidates", [])
-            ))
-            for col in scalar_cols:
-                axis = (hist_lib.axis.Regular(50, 0, 1, name=col, label=col) if col in score_cols
-                        else _feature_axis(col))
-                hists[col] = hist_lib.Hist(
-                    axis,
-                    hist_lib.axis.StrCategory([], name="process", growth=True),
-                    hist_lib.axis.StrCategory([], name="variation", growth=True),
-                    hist_lib.storage.Weight(),
-                )
-            for col in jagged_cols:
-                hists[col] = hist_lib.Hist(
-                    _feature_axis(col),
-                    hist_lib.axis.StrCategory([], name="process", growth=True),
-                    hist_lib.axis.StrCategory([], name="variation", growth=True),
-                    hist_lib.storage.Weight(),
-                )
-            return hists, set(jagged_cols)
-
-        def _fill_mva_histograms(hists, jagged_cols, df, process_name, weight_col="weight_nominal"):
-            """Fill score/feature histograms from a scored DataFrame. Scalar columns fill
-            directly; jagged (list-valued) columns are exploded so every jet/Z/lepton
-            entry gets its own fill, with the event weight repeated per entry (a jet-level
-            histogram, not an event-level one -- an event with 3 jets contributes 3
-            entries, each carrying that event's full weight, same convention coffea's
-            fill_histograms uses for jagged axes elsewhere in this codebase)."""
-            # Only fill events with valid scores (apply_mass_window sets -1 outside window)
-            mask = df["mva_signal_score"] >= 0
-            df_valid = df[mask]
-            if df_valid.empty:
-                return
-            event_weights = (
-                df_valid[weight_col].fillna(1.0)
-                if weight_col in df_valid.columns
-                else pd.Series(np.ones(len(df_valid)), index=df_valid.index)
-            )
-            for col, h in hists.items():
-                if col not in df_valid.columns:
-                    continue
-                if col in jagged_cols:
-                    exploded = df_valid[col].explode()
-                    exploded = exploded.dropna()
-                    if exploded.empty:
-                        continue
-                    w = event_weights.loc[exploded.index].values
-                    h.fill(**{col: exploded.astype(float).values}, process=process_name,
-                           variation="nominal", weight=w)
-                else:
-                    h.fill(**{col: df_valid[col].values}, process=process_name,
-                           variation="nominal", weight=event_weights.values)
-
-        # Run on merged parquets (parquets_<sample>/ dirs created by merge step)
-        merged_dirs = sorted(output_dir.glob("parquets_*"))
-        if not merged_dirs:
-            logging.warning(
-                "No merged parquet dirs found (parquets_*/). "
-                "Run with --postprocess first, or ensure --output_format parquet was used."
-            )
-        for merged_dir in merged_dirs:
-            sample_name = merged_dir.name.replace("parquets_", "")
-            sample_hists, jagged_cols = _build_mva_histograms(processor.class_names, processor)
-
-            for pq_file in sorted(merged_dir.rglob("*.parquet")):
-                df = pd.read_parquet(pq_file)
-                if df.empty:
-                    continue
-                features = processor.prepare_features(df)
-                result = processor.predict(features)
-                for i, cls in enumerate(processor.class_names):
-                    df[f"mva_score_{cls}"] = result["scores"][:, i]
-                df["mva_signal_score"] = result["signal_score"]
-                df["mva_class_prediction"] = result["class_prediction"]
-
-                # Save scored parquet
-                rel = pq_file.relative_to(merged_dir)
-                out_file = mva_output_dir / sample_name / rel
-                out_file.parent.mkdir(parents=True, exist_ok=True)
-                df.to_parquet(out_file, index=False)
-
-                # Accumulate into histograms
-                _fill_mva_histograms(sample_hists, jagged_cols, df, sample_name)
-                logging.info(
-                    f"  {sample_name}/{rel}: {len(df)} events, "
-                    f"mean signal score={df['mva_signal_score'].mean():.4f}"
-                )
-
-            # Save per-sample MVA histogram coffea file
-            hist_file = mva_output_dir / f"{sample_name}_mva_scores.coffea"
-            save(sample_hists, hist_file)
-            logging.info(f"  Saved histograms: {hist_file}")
-
-        logging.info("MVA inference complete")
-
     if args.plot:
         subprocess.run("python3 analysis/postprocess/build_color_map.py", shell=True)
         if not args.postprocess:
@@ -649,6 +516,7 @@ if __name__ == "__main__":
             output_dir=output_dir,
             group_by=group_by,
             pass_axis=args.pass_axis,
+            rebin=parse_rebin(args.rebin, list(histogram_config.axes.keys())),
         )
         for category in categories:
             logging.info(
@@ -670,6 +538,13 @@ if __name__ == "__main__":
                         continue
                 if plot_variable(variable, group_by, workflow_config.histogram_config):
                     logging.info(variable)
+                    blind_range = get_blind_range(
+                        variable, args.blind_range, args.blind_vars
+                    )
+                    if blind_range is not None:
+                        logging.info(
+                            f"  blinding data in [{blind_range[0]}, {blind_range[1]}]"
+                        )
                     plotter.plot_histograms(
                         variable=variable,
                         category=category,
@@ -677,10 +552,34 @@ if __name__ == "__main__":
                         log=args.log,
                         extension=args.extension,
                         blind=args.blind,
+                        blind_range=blind_range,
                     )
             if args.workflow.startswith("zplusl_"):
                 plotter.plot_fake_rate(category)
             subprocess.run(
                 f"tar -zcvf {output_dir}/{category}/{args.workflow}_{args.year}_plots.tar.gz {output_dir}/{category}/*.{args.extension}",
                 shell=True,
+            )
+
+        # Save fake rates once per year, computed directly from this plotter's
+        # already-loaded Data/WZ histograms (reusing the same barrel/endcap
+        # DATA-minus-WZ logic as plot_fake_rate/_debug_fr_table above),
+        # instead of relying on the separate, currently broken
+        # compute_fake_rates.py script.
+        #
+        # Written to the same path estimate_zx_background.py expects:
+        #   OUTPUT_DIR/fake_rates/{year}/fake_rates.pkl
+        #
+        # NOTE: only zplusl_ss and zplusl_os carry a "WZ" process in
+        # processed_histograms (see _is_wz_dataset filtering upstream in
+        # compute_fake_rates.py / load_zplusl_histograms). If you also run
+        # zplusl_ss_maximal/_minimal/_intermediate variants through --plot
+        # and they do NOT have a "WZ" key, narrow this condition to
+        # `args.workflow in ("zplusl_ss", "zplusl_os")` to avoid a KeyError.
+        if args.workflow.startswith("zplusl_"):
+            print_header(f"Saving fake rates for {args.year}")
+            fake_rates_path = OUTPUT_DIR / "fake_rates" / args.year / "fake_rates.pkl"
+            plotter.save_fake_rates(
+                output_path=fake_rates_path,
+                categories=tuple(categories),
             )
